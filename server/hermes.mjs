@@ -66,7 +66,9 @@ const PROVIDERS = {
   anthropic: { env: 'ANTHROPIC_API_KEY', baseEnv: 'ANTHROPIC_BASE_URL', base: '', hermes: 'anthropic', provider: 'anthropic', apiMode: 'anthropic_messages' },
   openrouter: { env: 'OPENROUTER_API_KEY', baseEnv: 'OPENROUTER_BASE_URL', base: 'https://openrouter.ai/api/v1', hermes: 'openrouter', provider: 'openrouter', apiMode: 'chat_completions' },
   deepseek: { env: 'DEEPSEEK_API_KEY', baseEnv: 'DEEPSEEK_BASE_URL', base: 'https://api.deepseek.com/v1', hermes: 'deepseek', provider: 'deepseek', apiMode: 'chat_completions' },
-  google: { env: 'GEMINI_API_KEY', baseEnv: 'GEMINI_BASE_URL', base: 'https://generativelanguage.googleapis.com/v1beta/openai', hermes: 'gemini', provider: 'gemini', apiMode: 'chat_completions' },
+  // Gemini keeps Hermes' native adapter unless the base URL says otherwise,
+  // so leave api_mode unset and let Hermes pick its transport.
+  google: { env: 'GEMINI_API_KEY', baseEnv: 'GEMINI_BASE_URL', base: 'https://generativelanguage.googleapis.com/v1beta/openai', hermes: 'gemini', provider: 'gemini', apiMode: '' },
   custom: { env: 'OPENAI_API_KEY', baseEnv: 'OPENAI_BASE_URL', base: '', hermes: 'openai', provider: 'openai', apiMode: 'chat_completions' },
 }
 
@@ -118,7 +120,9 @@ function updateHermesFiles(model) {
     ...(model.baseUrl
       ? [['set', 'model.base_url', model.baseUrl]]
       : [['unset', 'model.base_url', '']]),
-    ['set', 'model.api_mode', info.apiMode],
+    ...(info.apiMode
+      ? [['set', 'model.api_mode', info.apiMode]]
+      : [['unset', 'model.api_mode', '']]),
     ['set', 'model.default', target],
   ]
   for (const [action, key, value] of steps) {
