@@ -111,19 +111,24 @@ function updateHermesFiles(model) {
   // `hermes config set model.provider` clears base_url/api_mode that belonged to
   // the previous provider, so set the provider first and the endpoint after it.
   const target = `${info.hermes}/${model.model}`
-  try {
-    const steps = [
-      ['model.provider', info.provider],
-      ...(model.baseUrl ? [['model.base_url', model.baseUrl]] : []),
-      ['model.api_mode', info.apiMode],
-      ['model.default', target],
-    ]
-    for (const [key, value] of steps) {
-      const result = execFileSyncSafe(config.hermes.bin, ['config', 'set', key, value], hermesEnv())
+  const steps = [
+    ['set', 'model.provider', info.provider],
+    // A base URL left over from the previous provider would silently capture
+    // every request, so clear it when this provider uses its default endpoint.
+    ...(model.baseUrl
+      ? [['set', 'model.base_url', model.baseUrl]]
+      : [['unset', 'model.base_url', '']]),
+    ['set', 'model.api_mode', info.apiMode],
+    ['set', 'model.default', target],
+  ]
+  for (const [action, key, value] of steps) {
+    try {
+      const args = action === 'unset' ? ['config', 'unset', key] : ['config', 'set', key, value]
+      const result = execFileSyncSafe(config.hermes.bin, args, hermesEnv())
       if (result) logLine(`[model] ${String(result).trim()}`)
+    } catch (error) {
+      logLine(`[model] ${action} ${key} failed: ${error.message}`)
     }
-  } catch (error) {
-    logLine(`[model] failed to set default model: ${error.message}`)
   }
 }
 
