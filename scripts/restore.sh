@@ -35,7 +35,8 @@ start_service() {
 trap start_service EXIT INT TERM
 
 echo "恢复数据…"
-docker compose run --rm -T --no-deps teamos sh -c 'tar -xzf - -C /' < "$FILE"
+# 同 backup.sh：镜像 ENTRYPOINT 是 s6，覆盖 entrypoint 才能让 tar 直接执行。
+docker compose run --rm -T --no-deps --entrypoint sh teamos -c 'tar -xzf - -C /' < "$FILE"
 
 start_service
 trap - EXIT INT TERM

@@ -27,7 +27,9 @@ restore_service() {
 trap restore_service EXIT INT TERM
 
 echo "打包数据卷 → $OUT"
-docker compose run --rm -T --no-deps teamos sh -c 'tar -czf - -C / data opt/data' > "$OUT"
+# 镜像的 ENTRYPOINT 是 s6，直接 `compose run ... sh -c` 会把 tar 当成 s6 的参数忽略，
+# 所以必须覆盖 entrypoint 才能只跑一次打包。
+docker compose run --rm -T --no-deps --entrypoint sh teamos -c 'tar -czf - -C / data opt/data' > "$OUT"
 
 # 简单校验：能列出归档内容且非空。
 if [ ! -s "$OUT" ] || ! tar -tzf "$OUT" >/dev/null 2>&1; then
