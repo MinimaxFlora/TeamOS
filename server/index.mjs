@@ -5,8 +5,11 @@ import crypto from 'node:crypto'
 import { config, ROOT } from './config.mjs'
 import {
   countUsers,
+  connectorSecret,
   createUser,
+  deleteUser,
   deleteUserSessions,
+  getFileRow,
   getUserByEmail,
   getUserById,
   getRawState,
@@ -43,6 +46,7 @@ import {
 import {
   getGatewayStatus,
   initializeGateway,
+  listProviderModels,
   publicModelConfig,
   restartGateway,
   saveModelConfig,
@@ -50,8 +54,131 @@ import {
 } from './hermes.mjs'
 import { runAgentChat, testAgentReply } from './chat.mjs'
 import { summarizeTranscriptModel } from './minutes.mjs'
-import { acceptWebhook, extractEvent } from './webhooks.mjs'
-import { hashPassword, maskSecret, randomToken, sanitizeEmail, verifyPassword } from './security.mjs'
+import { acceptWebhook } from './webhooks.mjs'
+import { hashPassword, hmacHex, maskSecret, randomToken, sanitizeEmail, verifyPassword } from './security.mjs'
+import {
+  filePathFor,
+  fileText,
+  mimeForName,
+  publicFile,
+  PURPOSE_LIMITS,
+  removeFile,
+  saveUpload,
+  transcribeAudio,
+} from './files.mjs'
+import {
+  fileUsedByApprovedDoc,
+  humanSize,
+  proposeKnowledgeFromFile,
+  sweepExpiredKnowledge,
+} from './knowledge.mjs'
+
+function hmacBase64(key, value) {
+  return crypto.createHmac('sha256', key).update(value).digest('base64')
+}
+
+// 每个渠道的群机器人都有自己的报文格式和签名方式，测试投递必须按真实协议发送，
+// 否则「测试成功」并不代表正式消息能送达。
+function connectorTestRequest(connector, endpoint, secret, message) {
+  switch (connector.kind) {
+    case 'feishu': {
+      const timestamp = String(Math.floor(Date.now() / 1000))
+      return {
+        url: endpoint,
+        body: JSON.stringify({
+          timestamp,
+          sign: hmacBase64(`${timestamp}\n${secret}`, ''),
+          msg_type: 'text',
+          content: { text: message },
+        }),
+      }
+    }
+    case 'dingtalk': {
+      const timestamp = String(Date.now())
+      const target = new URL(endpoint)
+      target.searchParams.set('timestamp', timestamp)
+      target.searchParams.set('sign', hmacBase64(secret, `${timestamp}\n${secret}`))
+      return {
+        url: target.toString(),
+        body: JSON.stringify({ msgtype: 'text', text: { content: message } }),
+      }
+    }
+    case 'slack':
+      return { url: endpoint, body: JSON.stringify({ text: message }) }
+    case 'wecom':
+      return { url: endpoint, body: JSON.stringify({ msgtype: 'text', text: { content: message } }) }
+    default: {
+      const timestamp = String(Date.now())
+      const body = JSON.stringify({
+        event_id: `test_${timestamp}`,
+        event_type: 'teamos.test',
+        message,
+        sent_at: new Date(Number(timestamp)).toISOString(),
+      })
+      return {
+        url: endpoint,
+        body,
+        headers: {
+          'X-TeamOS-Timestamp': timestamp,
+          'X-TeamOS-Signature': `sha256=${hmacHex('sha256', secret, `${timestamp}.${body}`)}`,
+          'X-TeamOS-Event': 'teamos.test',
+        },
+      }
+    }
+  }
+}
+
+function providerError(payload) {
+  if (!payload || typeof payload !== 'object') return ''
+  const code = payload.code ?? payload.errcode ?? payload.StatusCode
+  if (code !== undefined && Number(code) !== 0) {
+    return String(payload.msg || payload.errmsg || payload.message || `返回码 ${code}`)
+  }
+  if (payload.ok === false) return String(payload.error || '远端返回 ok=false')
+  return ''
+}
+
+async function deliverConnectorTest(connector, endpoint, secret) {
+  const message = 'TeamOS 连接测试：收到这条消息说明渠道地址与签名配置可用。'
+  const request = connectorTestRequest(connector, endpoint, secret, message)
+  const started = Date.now()
+  try {
+    const response = await fetch(request.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'TeamOS-Connector-Test/1.0',
+        ...(request.headers ?? {}),
+      },
+      body: request.body,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10_000),
+    })
+    const latencyMs = Date.now() - started
+    const raw = await response.text().catch(() => '')
+    let parsed = null
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = null
+    }
+    const remoteError = providerError(parsed)
+    const ok = response.ok && !remoteError
+    const detail =
+      remoteError ||
+      (ok ? '远端已接收测试消息' : raw.slice(0, 200).replace(/\s+/g, ' ') || `远端返回 HTTP ${response.status}`)
+    return { ok, status: response.status, latencyMs, message: detail }
+  } catch (error) {
+    const latencyMs = Date.now() - started
+    const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
+    return {
+      ok: false,
+      status: 0,
+      latencyMs,
+      message: timedOut ? '请求超时（10 秒无响应）' : String(error?.message || error),
+    }
+  }
+}
 
 const server = http.createServer(async (req, res) => {
   const started = Date.now()
@@ -237,19 +364,28 @@ function draftAgentForTest(input, state) {
   }
 }
 
+function sanitizeAccount(value) {
+  const account = String(value || '').trim().toLowerCase()
+  if (!account || account.length > 120) return ''
+  if (account.includes('@')) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(account) ? account : ''
+  }
+  return /^[a-z0-9][a-z0-9._-]{2,31}$/.test(account) ? account : ''
+}
+
 function validateRegistration(body) {
-  const name = String(body.name || '').trim()
-  const email = sanitizeEmail(body.email)
+  const email = sanitizeAccount(body.account ?? body.email)
   const password = String(body.password || '')
-  const jobTitle = String(body.jobTitle || '').trim()
-  const department = String(body.department || '未分组').trim()
-  if (!name || name.length > 30) throw Object.assign(new Error('请填写姓名'), { status: 400 })
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw Object.assign(new Error('邮箱格式不正确'), { status: 400 })
+  const name = (String(body.name || '').trim() || email.split('@')[0] || '').slice(0, 30)
+  const jobTitle = String(body.jobTitle || '待分配').trim().slice(0, 40) || '待分配'
+  const department = String(body.department || '未分组').trim().slice(0, 40) || '未分组'
+  if (!email) {
+    throw Object.assign(new Error('账号需为 3-32 位字母、数字或邮箱'), { status: 400 })
+  }
   if (password.length < 8 || password.length > 200) {
     throw Object.assign(new Error('密码至少 8 位'), { status: 400 })
   }
-  if (!jobTitle || jobTitle.length > 40) throw Object.assign(new Error('请填写岗位名称'), { status: 400 })
-  return { name, email, password, jobTitle, department: department.slice(0, 40) }
+  return { name, email, password, jobTitle, department }
 }
 
 function memberObject({ id, name, email, jobTitle, department, role, status, color, groupIds }) {
@@ -265,6 +401,55 @@ function memberObject({ id, name, email, jobTitle, department, role, status, col
     joinedAt: nowISO(),
     groupIds,
   }
+}
+
+/** Owner and admin always may read a file; approved knowledge and hall attachments are shared. */
+function canReadFile(row, user) {
+  if (!row) return false
+  if (row.owner_id === user.member_id || user.role === 'admin') return true
+  const state = getState()
+  const approved = (state.knowledgeDocs ?? []).some(
+    (doc) =>
+      doc.fileId === row.id &&
+      doc.status === 'ready' &&
+      (!doc.restricted || doc.ownerId === user.member_id),
+  )
+  if (approved) return true
+  return (state.messages ?? []).some((message) =>
+    (message.attachments ?? []).some((item) => item.id === row.id),
+  )
+}
+
+function sendStoredFile(req, res, row, { inline = false } = {}) {
+  const target = filePathFor(row)
+  let stat
+  try {
+    stat = fs.statSync(target)
+  } catch {
+    sendError(res, 410, '文件已不存在')
+  }
+  const fallback = row.name.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '')
+  res.writeHead(200, {
+    'content-type': row.mime || mimeForName(row.name),
+    'content-length': stat.size,
+    'content-disposition': `${inline ? 'inline' : 'attachment'}; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(row.name)}`,
+    'cache-control': 'private, no-store',
+  })
+  if (req.method === 'HEAD') {
+    res.end()
+    return
+  }
+  fs.createReadStream(target).pipe(res)
+}
+
+function recordKnowledgeAudit(user, action, target, detail) {
+  updateState((state) => ({
+    ...state,
+    audit: [
+      { id: newId('au'), at: nowISO(), actorId: user.member_id, action, target, detail },
+      ...(state.audit ?? []),
+    ].slice(0, 2000),
+  }))
 }
 
 async function handleApi(req, res, url) {
@@ -283,6 +468,7 @@ async function handleApi(req, res, url) {
   }
 
   if (pathname === '/api/auth/me' && req.method === 'GET') {
+    sweepExpiredKnowledge()
     const user = currentSession(req)
     if (!user) {
       sendJson(res, 200, { authenticated: false, setupRequired: countUsers() === 0 })
@@ -309,16 +495,17 @@ async function handleApi(req, res, url) {
     const memberId = newId('u')
     const userId = newId('user')
     const role = first ? 'admin' : 'member'
+    const status = first ? 'active' : 'pending'
     const member = memberObject({
       id: memberId,
       name: input.name,
       email: input.email,
-      jobTitle: input.jobTitle,
+      jobTitle: first ? input.jobTitle : '待分配',
       department: input.department,
       role,
-      status: 'active',
+      status,
       color: AVATAR_COLORS[countUsers() % AVATAR_COLORS.length],
-      groupIds: ['g_all'],
+      groupIds: first ? ['g_all'] : [],
     })
     createUser({
       id: userId,
@@ -326,7 +513,7 @@ async function handleApi(req, res, url) {
       email: input.email,
       passwordHash: hashPassword(input.password),
       role,
-      status: 'active',
+      status,
     })
     const { state } = getRawState()
     let next
@@ -339,19 +526,14 @@ async function handleApi(req, res, url) {
       next = {
         ...state,
         members: [...(state.members ?? []), member],
-        groups: (state.groups ?? []).map((group) =>
-          group.id === 'g_all'
-            ? { ...group, memberIds: [...new Set([...(group.memberIds ?? []), memberId])], updatedAt: nowISO() }
-            : group,
-        ),
         audit: [
           {
             id: newId('au'),
             at: nowISO(),
             actorId: memberId,
             action: '员工自助注册',
-            target: `${member.name} · ${member.jobTitle}`,
-            detail: `加入 ${member.department}`,
+            target: member.name,
+            detail: '等待管理员审批',
           },
           ...(state.audit ?? []),
         ],
@@ -359,6 +541,14 @@ async function handleApi(req, res, url) {
     }
     saveState(next)
     if (first) resetConnectorRuntime()
+    if (!first) {
+      sendJson(res, 201, {
+        authenticated: false,
+        pending: true,
+        message: '注册申请已提交，请等待管理员通过后再登录。',
+      })
+      return
+    }
     const cookie = createSessionCookie(userId)
     res.setHeader('set-cookie', cookie)
     const user = getUserById(userId)
@@ -383,6 +573,9 @@ async function handleApi(req, res, url) {
       sendError(res, 401, '邮箱或密码不正确')
     }
     if (user.status === 'disabled') sendError(res, 403, '账号已被停用')
+    if (user.status === 'pending') {
+      sendError(res, 403, '注册申请已提交，请等待管理员通过后再登录')
+    }
     if (user.status === 'invited') {
       updateUser(user.id, { status: 'active', last_login_at: nowISO() })
       updateState((state) => ({
@@ -446,6 +639,7 @@ async function handleApi(req, res, url) {
   if (pathname === '/api/state' && req.method === 'GET') {
     const user = requireUser(req)
     if (!user) sendError(res, 401, '请先登录')
+    sweepExpiredKnowledge()
     sendJson(res, 200, {
       state: stateForUser(user),
       revision: getRawState().revision,
@@ -579,24 +773,45 @@ async function handleApi(req, res, url) {
       if (connector.status !== 'connected' || !connector.signature) {
         sendError(res, 409, '请先启用渠道并开启签名校验')
       }
-      const raw = JSON.stringify({
-        event_id: `test_${Date.now()}`,
-        event_type: 'teamos.test',
-        message: 'TeamOS 本地测试事件',
-      })
-      const event = extractEvent(raw)
-      const { insertWebhookEvent } = await import('./db.mjs')
-      insertWebhookEvent({
-        connectorId: id,
-        eventId: event.eventId,
-        eventType: event.eventType,
-        payload: event.payload,
-        signatureValid: true,
-      })
+      const config = connectorSecret(id)
+      if (!config?.endpoint) sendError(res, 409, '请先在渠道设置里填写目标地址')
+      if (!config?.secret) sendError(res, 409, '请先配置签名密钥')
+      const delivery = await deliverConnectorTest(connector, config.endpoint, config.secret)
+      const testedAt = nowISO()
+      updateState((current) => ({
+        ...current,
+        connectors: (current.connectors ?? []).map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                lastTest: {
+                  at: testedAt,
+                  ok: delivery.ok,
+                  status: delivery.status,
+                  latencyMs: delivery.latencyMs,
+                  message: delivery.message,
+                },
+              }
+            : item,
+        ),
+        audit: [
+          {
+            id: newId('au'),
+            at: testedAt,
+            actorId: user.member_id,
+            action: '渠道连通性测试',
+            target: connector.name,
+            detail: delivery.ok
+              ? `远端 HTTP ${delivery.status}，耗时 ${delivery.latencyMs}ms`
+              : `投递失败：${delivery.message}`,
+          },
+          ...(current.audit ?? []),
+        ],
+      }))
       const nextState = getState()
       sendJson(res, 200, {
-        ok: true,
-        eventId: event.eventId,
+        ok: delivery.ok,
+        delivery,
         state: stateForUser(user),
         revision: getRawState().revision,
         connectors: (nextState.connectors ?? []).filter((item) => item.id === id),
@@ -737,6 +952,11 @@ async function handleApi(req, res, url) {
       if (body.status !== undefined && body.status !== 'active') sendError(res, 400, '不能停用自己的账号')
     }
     const patch = {}
+    if (body.name !== undefined) {
+      const name = String(body.name).trim().slice(0, 30)
+      if (!name) sendError(res, 400, '姓名不能为空')
+      patch.name = name
+    }
     if (body.jobTitle !== undefined) patch.jobTitle = String(body.jobTitle).trim().slice(0, 40)
     if (body.department !== undefined) patch.department = String(body.department).trim().slice(0, 40)
     if (body.bio !== undefined) patch.bio = String(body.bio).trim().slice(0, 400)
@@ -745,7 +965,7 @@ async function handleApi(req, res, url) {
       patch.role = body.role
     }
     if (body.status !== undefined) {
-      if (!['active', 'invited', 'disabled'].includes(body.status)) sendError(res, 400, '状态不合法')
+      if (!['active', 'invited', 'pending', 'disabled'].includes(body.status)) sendError(res, 400, '状态不合法')
       patch.status = body.status
     }
     if (!Object.keys(patch).length) sendError(res, 400, '没有可更新的字段')
@@ -764,17 +984,36 @@ async function handleApi(req, res, url) {
       updateUser(targetUser.id, userPatch)
       if (patch.status === 'disabled') deleteUserSessions(targetUser.id)
     }
+    const approving = patch.status === 'active' && member.status === 'pending'
     updateState((state) => ({
       ...state,
       members: (state.members ?? []).map((item) =>
-        item.id === memberId ? { ...item, ...patch } : item,
+        item.id === memberId
+          ? {
+              ...item,
+              ...patch,
+              jobTitle: patch.jobTitle ?? (approving ? '待分配' : item.jobTitle),
+              groupIds: approving ? [COMPANY_ROOM_ID] : item.groupIds,
+            }
+          : item,
       ),
+      groups: approving
+        ? (state.groups ?? []).map((group) =>
+            group.id === COMPANY_ROOM_ID
+              ? {
+                  ...group,
+                  memberIds: [...new Set([...(group.memberIds ?? []), memberId])],
+                  updatedAt: nowISO(),
+                }
+              : group,
+          )
+        : state.groups,
       audit: [
         {
           id: newId('au'),
           at: nowISO(),
           actorId: user.member_id,
-          action: '修改成员信息',
+          action: approving ? '通过注册申请' : '修改成员信息',
           target: member.name,
           detail: Object.entries(patch)
             .map(([key, value]) => `${key} → ${String(value)}`)
@@ -790,6 +1029,256 @@ async function handleApi(req, res, url) {
       revision: getRawState().revision,
     })
     return
+  }
+
+  if (memberMatch && req.method === 'DELETE') {
+    const user = requireUser(req)
+    if (!isAdmin(user)) sendError(res, 403, '需要管理员权限')
+    const memberId = memberMatch[1]
+    if (memberId === user.member_id) sendError(res, 400, '不能删除自己的账号')
+    const current = getState()
+    const member = (current.members ?? []).find((item) => item.id === memberId)
+    if (!member) sendError(res, 404, '成员不存在')
+    if (member.role === 'admin') sendError(res, 409, '请先取消该成员的管理员权限')
+    const targetUser = listUsers().find((row) => row.member_id === memberId)
+    if (targetUser) deleteUser(targetUser.id)
+    updateState((state) => ({
+      ...state,
+      members: (state.members ?? []).filter((item) => item.id !== memberId),
+      groups: (state.groups ?? []).map((group) => ({
+        ...group,
+        memberIds: (group.memberIds ?? []).filter((id) => id !== memberId),
+      })),
+      audit: [
+        {
+          id: newId('au'),
+          at: nowISO(),
+          actorId: user.member_id,
+          action: member.status === 'pending' ? '拒绝注册申请' : '删除成员',
+          target: member.name,
+          detail: member.email,
+        },
+        ...(state.audit ?? []),
+      ],
+    }))
+    sendJson(res, 200, {
+      ok: true,
+      state: stateForUser(user),
+      revision: getRawState().revision,
+    })
+    return
+  }
+
+  if (pathname === '/api/model/catalog' && req.method === 'POST') {
+    const user = requireUser(req)
+    if (!isAdmin(user)) sendError(res, 403, '需要管理员权限')
+    rateLimit(`catalog:${user.id}`, 40, 60 * 1000)
+    const body = await readJson(req, 64 * 1024)
+    try {
+      const models = await listProviderModels({
+        provider: body.provider,
+        baseUrl: body.baseUrl,
+        apiKey: body.apiKey,
+      })
+      sendJson(res, 200, { ok: true, models })
+    } catch (error) {
+      sendJson(res, 502, { ok: false, error: error.message })
+    }
+    return
+  }
+
+  if (pathname === '/api/files' && req.method === 'POST') {
+    const user = requireUser(req)
+    if (!user) sendError(res, 401, '请先登录')
+    rateLimit(`upload:${user.id}`, 60, 60 * 1000)
+    const purpose = String(url.searchParams.get('purpose') || 'chat')
+    if (!PURPOSE_LIMITS[purpose]) sendError(res, 400, '上传用途不合法')
+    const name = String(url.searchParams.get('name') || '').trim().slice(0, 200)
+    if (!name) sendError(res, 400, '缺少文件名')
+    const raw = await readBody(req, PURPOSE_LIMITS[purpose] + 4096)
+    const row = saveUpload({
+      buffer: raw,
+      name,
+      mime: String(req.headers['content-type'] || ''),
+      ownerId: user.member_id,
+      purpose,
+    })
+    sendJson(res, 201, { ok: true, file: publicFile(row) })
+    return
+  }
+
+  const fileMatch = /^\/api\/files\/(f_[A-Za-z0-9]+)(?:\/(text|propose|transcribe))?$/.exec(pathname)
+  if (fileMatch) {
+    const user = requireUser(req)
+    if (!user) sendError(res, 401, '请先登录')
+    const [, fileId, action] = fileMatch
+    const row = getFileRow(fileId)
+    if (!row) sendError(res, 404, '文件不存在')
+
+    if (!action && ['GET', 'HEAD'].includes(req.method)) {
+      if (!canReadFile(row, user)) sendError(res, 403, '没有下载这个文件的权限')
+      sendStoredFile(req, res, row, { inline: url.searchParams.get('inline') === '1' })
+      return
+    }
+    if (!action && req.method === 'DELETE') {
+      if (row.owner_id !== user.member_id && user.role !== 'admin') {
+        sendError(res, 403, '只能删除自己上传的文件')
+      }
+      if (fileUsedByApprovedDoc(getState(), row.id)) {
+        sendError(res, 409, '这个文件已经归档到知识库，请先在知识库里移除')
+      }
+      removeFile(row.id)
+      sendJson(res, 200, { ok: true })
+      return
+    }
+    if (action === 'text' && req.method === 'GET') {
+      if (row.owner_id !== user.member_id && user.role !== 'admin') {
+        sendError(res, 403, '只能查看自己上传文件的文字内容')
+      }
+      sendJson(res, 200, {
+        ok: true,
+        text: fileText(row),
+        file: publicFile(row),
+      })
+      return
+    }
+    if (action === 'propose' && req.method === 'POST') {
+      const body = await readJson(req, 256 * 1024)
+      const doc = proposeKnowledgeFromFile({
+        user,
+        fileId: row.id,
+        title: body.title,
+        spaceId: body.spaceId,
+        summary: body.summary,
+        tags: body.tags,
+        restricted: body.restricted,
+        approve: user.role === 'admin',
+      })
+      recordKnowledgeAudit(
+        user,
+        '提交知识归档',
+        doc.title,
+        doc.status === 'ready'
+          ? `管理员上传，已直接生效：《${row.name}》`
+          : `《${row.name}》等待管理员审批，7 天内有效`,
+      )
+      sendJson(res, 201, {
+        ok: true,
+        doc,
+        state: stateForUser(user),
+        revision: getRawState().revision,
+      })
+      return
+    }
+    if (action === 'transcribe' && req.method === 'POST') {
+      if (row.owner_id !== user.member_id && user.role !== 'admin') {
+        sendError(res, 403, '只能转写自己上传的录音')
+      }
+      if (row.kind !== 'audio' && row.kind !== 'video') {
+        sendError(res, 400, '这个文件不是音频或视频')
+      }
+      rateLimit(`stt:${user.id}`, 20, 60 * 60 * 1000)
+      const result = transcribeAudio(filePathFor(row))
+      if (result.text) updateFileRow(row.id, { text: result.text })
+      sendJson(res, 200, { ok: true, text: result.text, durationSec: result.durationSec })
+      return
+    }
+    sendError(res, 405, '不支持的请求方法')
+  }
+
+  const knowledgeMatch = /^\/api\/knowledge\/([A-Za-z0-9_-]+)(?:\/(approve|reject))?$/.exec(pathname)
+  if (knowledgeMatch) {
+    const user = requireUser(req)
+    if (!isAdmin(user)) sendError(res, 403, '需要管理员权限')
+    const [, docId, action] = knowledgeMatch
+    const current = getRawState().state
+    const doc = (current.knowledgeDocs ?? []).find((item) => item.id === docId)
+    if (!doc) sendError(res, 404, '知识条目不存在')
+
+    if (action === 'approve' && req.method === 'POST') {
+      let content = String(doc.content || '')
+      if (!content && doc.fileId) {
+        const fileRow = getFileRow(doc.fileId)
+        if (fileRow) content = fileText(fileRow)
+      }
+      updateState((state) => ({
+        ...state,
+        knowledgeDocs: (state.knowledgeDocs ?? []).map((item) =>
+          item.id === docId
+            ? {
+                ...item,
+                status: 'ready',
+                content,
+                expiresAt: null,
+                approvedAt: nowISO(),
+                approvedBy: user.member_id,
+                updatedAt: nowISO(),
+              }
+            : item,
+        ),
+      }))
+      recordKnowledgeAudit(user, '审批通过知识归档', doc.title, `来源：${doc.source || '员工归档'}`)
+      sendJson(res, 200, {
+        ok: true,
+        state: stateForUser(user),
+        revision: getRawState().revision,
+      })
+      return
+    }
+    if (action === 'reject' && req.method === 'POST') {
+      const remaining = (current.knowledgeDocs ?? []).filter((item) => item.id !== docId)
+      saveState({ ...current, knowledgeDocs: remaining })
+      if (doc.fileId) {
+        const stillUsed = remaining.some((item) => item.fileId === doc.fileId && item.status === 'ready')
+        if (!stillUsed) removeFile(doc.fileId)
+      }
+      recordKnowledgeAudit(user, '驳回知识归档', doc.title, `《${doc.fileName || doc.title}》已删除`)
+      sendJson(res, 200, {
+        ok: true,
+        state: stateForUser(user),
+        revision: getRawState().revision,
+      })
+      return
+    }
+    if (!action && req.method === 'PATCH') {
+      const body = await readJson(req, 1024 * 1024)
+      const patch = {}
+      if (body.title !== undefined) {
+        const title = String(body.title).trim().slice(0, 80)
+        if (!title) sendError(res, 400, '标题不能为空')
+        patch.title = title
+      }
+      if (body.summary !== undefined) patch.summary = String(body.summary).trim().slice(0, 400)
+      if (body.content !== undefined) patch.content = String(body.content).slice(0, 400000)
+      if (body.restricted !== undefined) patch.restricted = Boolean(body.restricted)
+      if (body.spaceId !== undefined) {
+        if (!(current.knowledge ?? []).some((space) => space.id === body.spaceId)) {
+          sendError(res, 400, '知识空间不存在')
+        }
+        patch.spaceId = body.spaceId
+      }
+      if (Array.isArray(body.tags)) {
+        patch.tags = body.tags
+          .filter((tag) => typeof tag === 'string' && tag.trim())
+          .slice(0, 8)
+          .map((tag) => tag.trim().slice(0, 20))
+      }
+      patch.updatedAt = nowISO()
+      updateState((state) => ({
+        ...state,
+        knowledgeDocs: (state.knowledgeDocs ?? []).map((item) =>
+          item.id === docId ? { ...item, ...patch } : item,
+        ),
+      }))
+      sendJson(res, 200, {
+        ok: true,
+        doc: (getState().knowledgeDocs ?? []).find((item) => item.id === docId),
+        state: stateForUser(user),
+        revision: getRawState().revision,
+      })
+      return
+    }
+    sendError(res, 405, '不支持的请求方法')
   }
 
   if (pathname === '/api/meetings/summarize' && req.method === 'POST') {
@@ -841,6 +1330,19 @@ async function handleApi(req, res, url) {
     const session = (state.sessions ?? []).find((item) => item.id === sessionId)
     if (!session || session.archivedAt) sendError(res, 409, '会话不存在或已归档')
 
+    // 附件必须是本人上传的文件；文字内容会随本次提问一起交给模型。
+    const attachments = []
+    for (const rawId of Array.isArray(body.attachmentIds) ? body.attachmentIds.slice(0, 5) : []) {
+      const row = getFileRow(String(rawId))
+      if (!row || row.owner_id !== user.member_id) continue
+      attachments.push({
+        id: row.id,
+        name: row.name,
+        sizeLabel: humanSize(row.size),
+        text: fileText(row),
+      })
+    }
+
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache, no-transform',
@@ -873,9 +1375,33 @@ async function handleApi(req, res, url) {
         sessionId,
         prompt,
         history: body.history,
+        attachments,
         signal: controller.signal,
         onEvent: ({ event, data }) => sendEvent(event, data),
       })
+      // 员工 @ 助理要求“归档/记住”时，由助理把附件提交到知识库审批队列。
+      const wantsArchive =
+        attachments.length > 0 && /归档|存档|记住|记一下|知识库|保存到/.test(prompt)
+      if (wantsArchive) {
+        try {
+          const doc = proposeKnowledgeFromFile({
+            user,
+            fileId: attachments[0].id,
+            title: attachments[0].name,
+            spaceId: (state.knowledge ?? [])[0]?.id,
+            approve: user.role === 'admin',
+          })
+          sendEvent('note', {
+            text:
+              doc.status === 'ready'
+                ? `已把《${doc.fileName}》归档到「${(state.knowledge ?? []).find((space) => space.id === doc.spaceId)?.name ?? '企业知识'}」，助理现在就能引用。`
+                : `已把《${doc.fileName}》提交到「${(state.knowledge ?? []).find((space) => space.id === doc.spaceId)?.name ?? '企业知识'}」等待管理员审批，通过后全员可检索；7 天内未审批会自动删除。`,
+            docId: doc.id,
+          })
+        } catch (error) {
+          sendEvent('note', { text: `知识归档没有提交成功：${error.message}` })
+        }
+      }
       const endedAt = nowISO()
       const durationSec = Math.max(1, Math.round((Date.now() - runStartedAt) / 1000))
       const totalTokens = Number(result.usage?.total_tokens || 0)
@@ -1089,6 +1615,19 @@ server.listen(config.port, '0.0.0.0', () => {
   console.log(`TeamOS listening on :${config.port}`)
   console.log(`Data: ${config.dataDir}`)
   console.log(`Frontend: ${config.publicDir}`)
+  try {
+    const removed = sweepExpiredKnowledge()
+    if (removed) console.log(`清理过期知识归档 ${removed} 条`)
+  } catch (error) {
+    console.error('knowledge sweep failed:', error.message)
+  }
+  setInterval(() => {
+    try {
+      sweepExpiredKnowledge()
+    } catch (error) {
+      console.error('knowledge sweep failed:', error.message)
+    }
+  }, 60 * 60 * 1000).unref()
   initializeGateway()
 })
 

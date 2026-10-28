@@ -65,6 +65,7 @@ export type StatusKind =
   | 'stopped'
   | 'active'
   | 'invited'
+  | 'pending'
 
 const statusMap: Record<StatusKind, { tone: BadgeTone; label: string }> = {
   published: { tone: 'success', label: '已发布' },
@@ -79,6 +80,7 @@ const statusMap: Record<StatusKind, { tone: BadgeTone; label: string }> = {
   stopped: { tone: 'neutral', label: '已停止' },
   active: { tone: 'success', label: '在职' },
   invited: { tone: 'warning', label: '待加入' },
+  pending: { tone: 'warning', label: '待审批' },
 }
 
 export function StatusPill({ status, className }: { status: StatusKind; className?: string }) {

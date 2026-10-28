@@ -1,6 +1,6 @@
 export type View = 'workspace' | 'admin'
 export type Role = 'admin' | 'member'
-export type MemberStatus = 'active' | 'invited'
+export type MemberStatus = 'active' | 'invited' | 'pending' | 'disabled'
 export type Risk = 'low' | 'medium' | 'high'
 
 export type AgentIcon =
@@ -109,6 +109,9 @@ export interface Skill {
   author: string
   changelog: SkillChange[]
   icon: AgentIcon
+  /** SKILL.md 正文；导入的技能保留原文，可编辑。 */
+  content?: string
+  sourceUrl?: string
 }
 
 export interface Group {
@@ -215,6 +218,15 @@ export interface KnowledgeDoc {
   restricted: boolean
   status: KnowledgeDocStatus
   updatedAt: string
+  /** 归档文件的正文（管理员可编辑）。 */
+  content?: string
+  fileId?: string
+  fileName?: string
+  /** 待审批文档的到期时间；超过 7 天未审批会被删除。 */
+  expiresAt?: string | null
+  approvedAt?: string
+  approvedBy?: string
+  createdAt?: string
 }
 
 export interface MeetingAction {
@@ -238,6 +250,10 @@ export interface MeetingNote {
   actions: MeetingAction[]
   createdAt: string
   createdBy: string
+  /** 转写后的完整文字记录，可编辑。 */
+  transcript?: string
+  audioFileId?: string
+  audioName?: string
 }
 
 export type ConnectorKind = 'wecom' | 'feishu' | 'dingtalk' | 'slack' | 'webhook'
@@ -257,6 +273,13 @@ export interface Connector {
   scopes: string[]
   events: number
   lastEventAt?: string
+  lastTest?: {
+    at: string
+    ok: boolean
+    status: number
+    latencyMs: number
+    message: string
+  }
   createdAt: string
 }
 
@@ -285,6 +308,10 @@ export interface Company {
   plan: string
   deployment: string
   createdAt: string
+  /** 管理员自定义的岗位列表（不同公司各不相同）。 */
+  positions?: string[]
+  /** 管理员自定义的部门列表。 */
+  departments?: string[]
 }
 
 export interface AuditEvent {

@@ -114,6 +114,9 @@ export const SKILL_CATEGORIES = [
   '内容创作',
   '法务合规',
   '运维',
+  '编程开发',
+  '自动化',
+  '通用',
 ]
 
 export const TEMPLATE_CATEGORIES = [
@@ -1674,6 +1677,40 @@ export function createSeedState(): AppState {
     meetings,
     connectors,
     audit,
+    currentUserId: null,
+  }
+}
+
+/**
+ * 登录前的空状态：真实数据只来自服务端。这里刻意不放任何演示成员、消息或知识，
+ * 避免未登录/加载中时把假数据当成客户数据展示。
+ */
+export function createEmptyState(): AppState {
+  return {
+    company: {
+      name: '我的公司',
+      shortName: '公司',
+      adminEmail: '',
+      timezone: '(UTC+08:00) 中国标准时间',
+      plan: '私有部署',
+      deployment: '等待管理员配置',
+      createdAt: new Date().toISOString(),
+      positions: [],
+      departments: [],
+    },
+    members: [],
+    agents: [],
+    skills: [],
+    groups: [],
+    sessions: [],
+    activeSessionId: '',
+    messages: [],
+    runs: [],
+    knowledge: [],
+    knowledgeDocs: [],
+    meetings: [],
+    connectors: [],
+    audit: [],
     currentUserId: null,
   }
 }

@@ -12,6 +12,8 @@ test-results
 !.env.example
 .teamos-data
 .test-data
+.e2e-data
+.tmp
 backups
 *.log
 *.tsbuildinfo

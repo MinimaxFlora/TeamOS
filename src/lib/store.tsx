@@ -18,7 +18,6 @@ import type {
   ChatSession,
   Connector,
   Group,
-  KnowledgeDoc,
   Member,
   MeetingNote,
   Message,
@@ -89,18 +88,17 @@ export interface StoreValue {
   dismissToast: (id: string) => void
   login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>
   logout: () => Promise<void>
-  register: (input: {
-    name: string
-    email: string
-    password: string
-    jobTitle: string
-    department: string
-    companyName?: string
-  }) => Promise<{ ok: boolean; error?: string }>
+  register: (input: { account: string; password: string }) => Promise<{
+    ok: boolean
+    error?: string
+    pending?: boolean
+    message?: string
+  }>
   updateMember: (
     id: string,
-    patch: Partial<Pick<Member, 'jobTitle' | 'department' | 'role' | 'status' | 'bio'>>,
+    patch: Partial<Pick<Member, 'name' | 'jobTitle' | 'department' | 'role' | 'status' | 'bio'>>,
   ) => Promise<{ ok: boolean; error?: string }>
+  deleteMember: (id: string) => Promise<{ ok: boolean; error?: string }>
   inviteMember: (input: {
     name: string
     email: string
@@ -127,7 +125,18 @@ export interface StoreValue {
     version?: string
     risk?: Risk
     permissions?: string[]
+    content?: string
+    sourceUrl?: string
+    sourceLabel?: string
+    author?: string
+    license?: string
   }) => string
+  updateSkill: (
+    id: string,
+    patch: Partial<
+      Pick<Skill, 'name' | 'description' | 'category' | 'version' | 'risk' | 'permissions' | 'content' | 'sourceUrl'>
+    >,
+  ) => void
   deleteSkill: (id: string) => void
   setSkillStatus: (id: string, status: Skill['status']) => void
   createKnowledgeDoc: (input: {
@@ -135,11 +144,16 @@ export interface StoreValue {
     title: string
     summary: string
     tags: string[]
-    kind: KnowledgeDoc['kind']
     restricted: boolean
-  }) => { ok: boolean; error?: string }
-  approveKnowledgeDoc: (id: string) => void
-  deleteKnowledgeDoc: (id: string) => void
+    fileId?: string
+    content?: string
+  }) => Promise<{ ok: boolean; error?: string }>
+  approveKnowledgeDoc: (id: string) => Promise<{ ok: boolean; error?: string }>
+  deleteKnowledgeDoc: (id: string) => Promise<{ ok: boolean; error?: string }>
+  updateKnowledgeDoc: (
+    id: string,
+    patch: { title?: string; summary?: string; content?: string; tags?: string[]; restricted?: boolean; spaceId?: string },
+  ) => Promise<{ ok: boolean; error?: string }>
   createMeeting: (input: {
     title: string
     meetingAt: string
@@ -147,9 +161,26 @@ export interface StoreValue {
     participantIds: string[]
     transcript: string
     confidential: boolean
+    audioFileId?: string
+    audioName?: string
+    source?: MeetingNote['source']
   }) => Promise<{ ok: boolean; error?: string; warning?: string }>
   toggleMeetingAction: (meetingId: string, actionId: string) => void
   deleteMeeting: (id: string) => void
+  updateMeeting: (
+    id: string,
+    patch: {
+      title?: string
+      transcript?: string
+      summary?: string[]
+      decisions?: string[]
+      actions?: MeetingNote['actions']
+    },
+  ) => void
+  resummarizeMeeting: (
+    id: string,
+    transcript: string,
+  ) => Promise<{ ok: boolean; error?: string; warning?: string; modelUsed?: boolean }>
   updateConnector: (
     id: string,
     patch: Partial<Pick<Connector, 'status' | 'signature' | 'scopes'>> & {
@@ -157,7 +188,11 @@ export interface StoreValue {
       secret?: string
     },
   ) => Promise<{ ok: boolean; error?: string }>
-  testConnector: (id: string) => Promise<{ ok: boolean; error?: string }>
+  testConnector: (id: string) => Promise<{
+    ok: boolean
+    error?: string
+    delivery?: { status: number; latencyMs: number; message: string }
+  }>
   sendMessage: (input: {
     content: string
     mentionAgentIds?: string[]
@@ -356,13 +391,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     async (input) => {
       try {
         const response = await api.register({
-          name: input.name.trim(),
-          email: input.email.trim(),
+          account: input.account.trim(),
           password: input.password,
-          jobTitle: input.jobTitle.trim(),
-          department: input.department,
-          companyName: input.companyName,
         })
+        if (response.pending) {
+          setSetupRequired(false)
+          return {
+            ok: false,
+            pending: true,
+            message: response.message || '注册申请已提交，请等待管理员通过。',
+          }
+        }
         if (!applyAuth(response)) return { ok: false, error: '注册响应不完整' }
         notify('欢迎加入 TeamOS', {
           description: '你已进入公司大厅，可以开始 @ 助理了。',
@@ -414,6 +453,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const result = await api.patchMember(id, patch)
         applyServerState(result.state)
         notify('成员信息已更新', { tone: 'success' })
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: describeError(error) }
+      }
+    },
+    [applyServerState, notify],
+  )
+
+  const deleteMember = useCallback<StoreValue['deleteMember']>(
+    async (id) => {
+      try {
+        const result = await api.deleteMember(id)
+        applyServerState(result.state)
+        notify('成员记录已删除', { tone: 'success' })
         return { ok: true }
       } catch (error) {
         return { ok: false, error: describeError(error) }
@@ -699,19 +752,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         category: input.category,
         source: input.source,
         sourceLabel:
-          input.source === 'custom'
+          input.sourceLabel ??
+          (input.source === 'custom'
             ? `企业自建 · ${currentUser?.name ?? '管理员'}`
-            : 'Skills Hub · 手动导入',
+            : 'Skills Hub · 手动导入'),
         version: input.version?.trim() || '0.1.0',
         risk: input.risk ?? 'medium',
         status: 'review',
         permissions: input.permissions ?? [],
         agentIds: [],
         updatedAt: now,
-        license: input.source === 'custom' ? '企业内部' : '待确认',
-        author: currentUser?.name ?? '管理员',
+        license: input.license || (input.source === 'custom' ? '企业内部' : '待确认'),
+        author: input.author || currentUser?.name || '管理员',
         changelog: [{ version: input.version?.trim() || '0.1.0', date: now, note: '导入，等待审批' }],
         icon: 'file',
+        content: input.content ?? '',
+        sourceUrl: input.sourceUrl,
       }
       setState((prev) => ({ ...prev, skills: [skill, ...prev.skills] }))
       pushAudit('导入 Skill', `${skill.name} · v${skill.version}`, '进入待审核队列')
@@ -757,67 +813,108 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [notify, pushAudit, state.skills],
   )
 
+  const updateSkill = useCallback<StoreValue['updateSkill']>(
+    (id, patch) => {
+      setState((prev) => ({
+        ...prev,
+        skills: prev.skills.map((skill) =>
+          skill.id === id ? { ...skill, ...patch, updatedAt: nowISO() } : skill,
+        ),
+      }))
+      const skill = state.skills.find((item) => item.id === id)
+      if (skill) pushAudit('编辑 Skill', skill.name, Object.keys(patch).join('、'))
+      notify('Skill 已保存', { tone: 'success' })
+    },
+    [notify, pushAudit, state.skills],
+  )
+
   const createKnowledgeDoc = useCallback<StoreValue['createKnowledgeDoc']>(
-    (input) => {
+    async (input) => {
       const title = input.title.trim()
       if (!title) return { ok: false, error: '请填写文档标题。' }
       const space = state.knowledge.find((item) => item.id === input.spaceId)
       if (!space) return { ok: false, error: '请选择有效的知识空间。' }
-      const doc: KnowledgeDoc = {
-        id: uid('kd'),
-        spaceId: space.id,
-        title,
-        summary: input.summary.trim() || '（暂无摘要，审批人可补充）',
-        tags: input.tags.map((tag) => tag.trim()).filter(Boolean).slice(0, 6),
-        kind: input.kind,
-        size: '未上传原件',
-        source: '管理台录入 · 仅保存摘要',
-        ownerId: state.currentUserId ?? 'u_lin',
-        restricted: input.restricted,
-        status: 'review',
-        updatedAt: nowISO(),
+      try {
+        let fileId = input.fileId
+        if (!fileId) {
+          const content = String(input.content ?? '').trim()
+          if (!content) return { ok: false, error: '请上传文件，或粘贴文档正文。' }
+          const uploaded = await api.uploadFile(
+            new Blob([content], { type: 'text/markdown' }),
+            `${title}.md`,
+            'knowledge',
+          )
+          fileId = uploaded.id
+        }
+        const result = await api.proposeFile(fileId, {
+          title,
+          summary: input.summary.trim(),
+          spaceId: space.id,
+          tags: input.tags.map((tag) => tag.trim()).filter(Boolean).slice(0, 8),
+          restricted: input.restricted,
+        })
+        if (result.state) applyServerState(result.state)
+        const approved = result.doc?.status === 'ready'
+        notify(approved ? '知识已上传并生效' : '已提交知识审批', {
+          description: approved
+            ? '助理现在可以在授权范围内引用这份资料。'
+            : '管理员通过后，绑定了该空间的助理才能引用这份资料；7 天内未审批会自动删除。',
+          tone: approved ? 'success' : 'default',
+        })
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: describeError(error) }
       }
-      setState((prev) => ({ ...prev, knowledgeDocs: [doc, ...prev.knowledgeDocs] }))
-      pushAudit('新增知识文档', doc.title, `${space.name} · 待审批，未进入助理知识范围`)
-      notify('已提交知识审批', {
-        description: '审批通过后，绑定了该空间的助理才能引用这篇文档。',
-      })
-      return { ok: true }
     },
-    [notify, pushAudit, state.currentUserId, state.knowledge],
+    [applyServerState, notify, state.knowledge],
   )
 
   const approveKnowledgeDoc = useCallback<StoreValue['approveKnowledgeDoc']>(
-    (id) => {
-      const doc = state.knowledgeDocs.find((item) => item.id === id)
-      if (!doc) return
-      setState((prev) => ({
-        ...prev,
-        knowledgeDocs: prev.knowledgeDocs.map((item) =>
-          item.id === id ? { ...item, status: 'ready', updatedAt: nowISO() } : item,
-        ),
-      }))
-      pushAudit('审批知识文档', doc.title, '已通过审批，进入助理知识范围')
-      notify('知识已通过审批', {
-        description: '助理现在可以在授权范围内引用这篇文档。',
-        tone: 'success',
-      })
+    async (id) => {
+      try {
+        const result = await api.approveKnowledge(id)
+        applyServerState(result.state)
+        notify('知识已通过审批', {
+          description: '助理现在可以在授权范围内引用这篇文档。',
+          tone: 'success',
+        })
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: describeError(error) }
+      }
     },
-    [notify, pushAudit, state.knowledgeDocs],
+    [applyServerState, notify],
   )
 
   const deleteKnowledgeDoc = useCallback<StoreValue['deleteKnowledgeDoc']>(
-    (id) => {
-      const doc = state.knowledgeDocs.find((item) => item.id === id)
-      if (!doc) return
-      setState((prev) => ({
-        ...prev,
-        knowledgeDocs: prev.knowledgeDocs.filter((item) => item.id !== id),
-      }))
-      pushAudit('删除知识文档', doc.title, '文档已从知识空间移除，历史引用不受影响')
-      notify('知识文档已删除', { tone: 'warning' })
+    async (id) => {
+      try {
+        const result = await api.rejectKnowledge(id)
+        applyServerState(result.state)
+        notify('知识文档已删除', {
+          description: '原始文件同时从服务器删除（仍被其他已审批文档引用时保留）。',
+          tone: 'warning',
+        })
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: describeError(error) }
+      }
     },
-    [notify, pushAudit, state.knowledgeDocs],
+    [applyServerState, notify],
+  )
+
+  const updateKnowledgeDoc = useCallback<StoreValue['updateKnowledgeDoc']>(
+    async (id, patch) => {
+      try {
+        const result = await api.patchKnowledge(id, patch)
+        applyServerState(result.state)
+        notify('知识文档已保存', { tone: 'success' })
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: describeError(error) }
+      }
+    },
+    [applyServerState, notify],
   )
 
   const createMeeting = useCallback<StoreValue['createMeeting']>(
@@ -845,13 +942,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         meetingAt: input.meetingAt || nowISO(),
         durationMin: input.durationMin > 0 ? input.durationMin : 30,
         participantIds: participants.map((member) => member.id),
-        source: 'paste',
+        source: input.source ?? (input.audioFileId ? 'upload' : 'paste'),
         confidential: input.confidential,
         summary: result.summary,
         decisions: result.decisions,
         actions: result.actions.map((action) => ({ ...action, id: uid('ma'), done: false })),
         createdAt: nowISO(),
         createdBy: state.currentUserId ?? '',
+        transcript,
+        audioFileId: input.audioFileId,
+        audioName: input.audioName,
       }
       setState((prev) => ({ ...prev, meetings: [meeting, ...prev.meetings] }))
       pushAudit(
@@ -899,6 +999,59 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setState((prev) => ({ ...prev, meetings: prev.meetings.filter((item) => item.id !== id) }))
       pushAudit('删除会议纪要', meeting.title, '纪要已删除，已生成的行动项不再显示')
       notify('会议纪要已删除', { tone: 'warning' })
+    },
+    [notify, pushAudit, state.meetings],
+  )
+
+  const updateMeeting = useCallback<StoreValue['updateMeeting']>(
+    (id, patch) => {
+      setState((prev) => ({
+        ...prev,
+        meetings: prev.meetings.map((meeting) =>
+          meeting.id === id ? { ...meeting, ...patch } : meeting,
+        ),
+      }))
+    },
+    [],
+  )
+
+  const resummarizeMeeting = useCallback<StoreValue['resummarizeMeeting']>(
+    async (id, transcript) => {
+      const meeting = state.meetings.find((item) => item.id === id)
+      if (!meeting) return { ok: false, error: '会议纪要不存在。' }
+      const text = transcript.trim()
+      if (!text) return { ok: false, error: '转写文字不能为空。' }
+      try {
+        const result = await api.summarizeMeeting({
+          title: meeting.title,
+          transcript: text,
+          participantIds: meeting.participantIds,
+        })
+        setState((prev) => ({
+          ...prev,
+          meetings: prev.meetings.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  transcript: text,
+                  summary: result.summary,
+                  decisions: result.decisions,
+                  actions: result.actions.map((action) => ({ ...action, id: uid('ma'), done: false })),
+                }
+              : item,
+          ),
+        }))
+        pushAudit('重新总结纪要', meeting.title, `${result.summary.length} 条摘要，${result.actions.length} 个行动项`)
+        notify(result.modelUsed ? '纪要已重新总结' : '已用本地规则重新总结', {
+          description: result.modelUsed
+            ? '摘要、决议与行动项已更新，请检查后保存。'
+            : result.warning || '模型尚未配置，本次由本地规则提取。',
+          tone: result.modelUsed ? 'success' : 'warning',
+        })
+        return { ok: true, warning: result.warning, modelUsed: result.modelUsed }
+      } catch (error) {
+        return { ok: false, error: describeError(error) }
+      }
     },
     [notify, pushAudit, state.meetings],
   )
@@ -958,12 +1111,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       try {
         const result = await api.testConnector(id)
         applyServerState(result.state)
-        pushAudit('渠道事件投递', connector.name, `测试事件 ${result.eventId}：签名校验通过，已入库去重`)
-        notify('测试事件已投递', {
-          description: '服务端已完成签名校验与去重，事件记录可在事件列表中查看。',
-          tone: 'success',
+        const delivery = result.delivery
+        if (result.ok) {
+          pushAudit(
+            '渠道连通性测试',
+            connector.name,
+            `远端 HTTP ${delivery.status}，耗时 ${delivery.latencyMs}ms`,
+          )
+          notify('测试消息已送达', {
+            description: `远端 HTTP ${delivery.status}，耗时 ${delivery.latencyMs}ms。`,
+            tone: 'success',
+          })
+          return { ok: true, delivery }
+        }
+        pushAudit('渠道连通性测试', connector.name, `投递失败：${delivery.message}`)
+        notify('测试消息未送达', {
+          description: delivery.message,
+          tone: 'warning',
         })
-        return { ok: true }
+        return { ok: false, error: delivery.message, delivery }
       } catch (error) {
         return { ok: false, error: describeError(error) }
       }
@@ -972,7 +1138,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   )
 
   const runStream = useCallback(
-    (runId: string, messageId: string, agent: Agent, prompt: string, sessionId: string) => {
+    (
+      runId: string,
+      messageId: string,
+      agent: Agent,
+      prompt: string,
+      sessionId: string,
+      attachmentIds?: string[],
+    ) => {
       const controller = new AbortController()
       abortRef.current.set(runId, controller)
 
@@ -1022,8 +1195,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }))
       }
 
+      const uploadedIds = (attachmentIds ?? []).filter((id) => /^f_[A-Za-z0-9]+$/.test(id)).slice(0, 5)
+
       void streamChat(
-        { agentId: agent.id, sessionId, message: prompt, runId, messageId },
+        {
+          agentId: agent.id,
+          sessionId,
+          message: prompt,
+          runId,
+          messageId,
+          ...(uploadedIds.length ? { attachmentIds: uploadedIds } : {}),
+        },
         {
           onStart: (data) => patchRun({ startedAt: data.at, status: 'running' }),
           onMeta: (data) => {
@@ -1049,6 +1231,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               ),
             }))
             transitionSteps('delta')
+          },
+          onNote: (data) => {
+            if (!data.text) return
+            setState((prev) => ({
+              ...prev,
+              messages: [
+                ...prev.messages,
+                {
+                  id: uid('m'),
+                  groupId: COMPANY_ROOM_ID,
+                  sessionId,
+                  authorId: agent.id,
+                  authorType: 'system' as const,
+                  content: data.text,
+                  createdAt: nowISO(),
+                },
+              ],
+            }))
+            notify('知识归档', { description: data.text, tone: 'success' })
           },
           onDone: (data) => {
             setState((prev) => {
@@ -1284,7 +1485,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         agentsToRun.forEach((agent, index) => {
           const run = runs[index]
-          runStream(run.id, run.messageId, agent, content, activeSession.id)
+          runStream(
+            run.id,
+            run.messageId,
+            agent,
+            content,
+            activeSession.id,
+            (input.attachments ?? []).map((attachment) => attachment.id),
+          )
         })
       })()
     },
@@ -1415,6 +1623,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       logout,
       register,
       updateMember,
+      deleteMember,
       inviteMember,
       createAgentFromTemplate,
       createBlankAgent,
@@ -1427,12 +1636,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       createSkill,
       deleteSkill,
       setSkillStatus,
+      updateSkill,
       createKnowledgeDoc,
       approveKnowledgeDoc,
       deleteKnowledgeDoc,
+      updateKnowledgeDoc,
       createMeeting,
       toggleMeetingAction,
       deleteMeeting,
+      updateMeeting,
+      resummarizeMeeting,
       updateConnector,
       testConnector,
       sendMessage,
@@ -1456,6 +1669,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       logout,
       register,
       updateMember,
+      deleteMember,
       inviteMember,
       createAgentFromTemplate,
       createBlankAgent,
@@ -1468,12 +1682,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       createSkill,
       deleteSkill,
       setSkillStatus,
+      updateSkill,
       createKnowledgeDoc,
       approveKnowledgeDoc,
       deleteKnowledgeDoc,
+      updateKnowledgeDoc,
       createMeeting,
       toggleMeetingAction,
       deleteMeeting,
+      updateMeeting,
+      resummarizeMeeting,
       updateConnector,
       testConnector,
       sendMessage,

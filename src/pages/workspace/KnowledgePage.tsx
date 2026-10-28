@@ -2,9 +2,12 @@ import {
   ArrowRight,
   BookOpen,
   CheckCircle2,
+  Clock3,
+  Download,
   FileSpreadsheet,
   FileText,
   Link2,
+  Loader2,
   Lock,
   MessageSquare,
   Presentation,
@@ -12,8 +15,9 @@ import {
   ShieldCheck,
   Sparkles,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { api, describeError } from '../../lib/api'
 import { useStore } from '../../lib/store'
 import type { KnowledgeDoc, KnowledgeDocKind } from '../../lib/types'
 import { formatRelative } from '../../lib/format'
@@ -49,6 +53,10 @@ export function WorkspaceKnowledgePage() {
   const spaces = state.knowledge
   const readyDocs = useMemo(
     () => state.knowledgeDocs.filter((doc) => doc.status === 'ready'),
+    [state.knowledgeDocs],
+  )
+  const myReviewDocs = useMemo(
+    () => state.knowledgeDocs.filter((doc) => doc.status === 'review'),
     [state.knowledgeDocs],
   )
 
@@ -149,6 +157,36 @@ export function WorkspaceKnowledgePage() {
           ))}
         </div>
       </div>
+
+      {myReviewDocs.length > 0 && (
+        <div className="mb-5 rounded-xl border border-warning/30 bg-warning-soft/40 px-4 py-3">
+          <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+            <Clock3 size={13} className="text-warning" />
+            我提交的归档 · {myReviewDocs.length} 份待管理员审批
+          </div>
+          <p className="mt-0.5 text-[11px] leading-5 text-muted">
+            审批通过后助理才能引用；7 天内未审批的文件会连同原件自动删除。
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {myReviewDocs.map((doc) => (
+              <button
+                key={doc.id}
+                type="button"
+                onClick={() => setSelected(doc)}
+                className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11.5px] text-ink-soft hover:border-line-strong"
+              >
+                <FileText size={12} className="shrink-0" />
+                <span className="truncate">{doc.title}</span>
+                <span className="shrink-0 text-[10px] text-warning">
+                  {doc.expiresAt
+                    ? `${Math.max(0, Math.ceil((new Date(doc.expiresAt).getTime() - Date.now()) / 86_400_000))} 天后删除`
+                    : '待审批'}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {visible.length === 0 ? (
         <EmptyState
@@ -267,7 +305,43 @@ function KnowledgeDocDialog({
   onClose: () => void
   onAsk: (doc: KnowledgeDoc) => void
 }) {
-  const { state } = useStore()
+  const { state, notify } = useStore()
+  const [content, setContent] = useState('')
+  const [loadingText, setLoadingText] = useState(false)
+  const [textError, setTextError] = useState('')
+  const docId = doc?.id
+  const fileId = doc?.fileId
+  const inlineContent = doc?.content
+
+  useEffect(() => {
+    if (!docId) return
+    if (inlineContent) {
+      setContent(inlineContent)
+      return
+    }
+    if (!fileId) {
+      setContent('')
+      return
+    }
+    let cancelled = false
+    setLoadingText(true)
+    setTextError('')
+    api
+      .fileText(fileId)
+      .then((result) => {
+        if (!cancelled) setContent(result.text)
+      })
+      .catch((error) => {
+        if (!cancelled) setTextError(describeError(error))
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingText(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [docId, fileId, inlineContent])
+
   if (!doc) return null
   const space = state.knowledge.find((item) => item.id === doc.spaceId)
   const owner = state.members.find((member) => member.id === doc.ownerId)
@@ -285,9 +359,15 @@ function KnowledgeDocDialog({
         />
         <DialogBody className="space-y-5">
           <div className="flex flex-wrap items-center gap-1.5">
-            <Badge tone="success" dot>
-              已审批
-            </Badge>
+            {doc.status === 'ready' ? (
+              <Badge tone="success" dot>
+                已审批
+              </Badge>
+            ) : (
+              <Badge tone="warning" dot>
+                待管理员审批
+              </Badge>
+            )}
             {doc.restricted ? (
               <Badge tone="warning">
                 <Lock size={10} /> 受限文档
@@ -307,7 +387,70 @@ function KnowledgeDocDialog({
 
           <section>
             <h3 className="mb-1.5 text-[12px] font-semibold text-ink">摘要</h3>
-            <p className="text-[12.5px] leading-6 text-ink-soft">{doc.summary}</p>
+            <p className="text-[12.5px] leading-6 text-ink-soft">{doc.summary || '（暂无摘要）'}</p>
+          </section>
+
+          {doc.status === 'review' && doc.expiresAt && (
+            <div className="rounded-lg bg-warning-soft px-3 py-2 text-[11px] leading-5 text-warning">
+              这份文件还在审批队列中，{new Date(doc.expiresAt).toLocaleString('zh-CN')} 前未审批将自动删除。
+            </div>
+          )}
+
+          {doc.fileId && (
+            <section>
+              <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-raised px-3 py-2.5">
+                <FileText size={13} className="shrink-0 text-muted" />
+                <span className="min-w-0 flex-1 truncate text-[11.5px] text-ink">
+                  {doc.fileName || doc.title}
+                </span>
+                <span className="shrink-0 text-[10.5px] text-faint">{doc.size}</span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() =>
+                    void api.downloadFile(doc.fileId!, doc.fileName || doc.title).catch((error) =>
+                      notify('下载失败', { description: describeError(error), tone: 'danger' }),
+                    )
+                  }
+                >
+                  <Download size={12} /> 下载到本地
+                </Button>
+              </div>
+              {doc.fileName && /\.(png|jpe?g|webp|gif)$/i.test(doc.fileName) && (
+                <img
+                  src={api.fileUrl(doc.fileId, true)}
+                  alt={doc.title}
+                  className="max-h-[300px] w-auto rounded-lg border border-line"
+                />
+              )}
+              {doc.fileName && /\.pdf$/i.test(doc.fileName) && (
+                <iframe
+                  src={api.fileUrl(doc.fileId, true)}
+                  title={doc.title}
+                  className="h-[320px] w-full rounded-lg border border-line"
+                />
+              )}
+            </section>
+          )}
+
+          <section>
+            <h3 className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold text-ink">
+              正文
+              {loadingText && <Loader2 size={12} className="animate-spin text-faint" />}
+            </h3>
+            {textError ? (
+              <p className="text-[11.5px] leading-5 text-warning">
+                无法读取文件文字：{textError}
+              </p>
+            ) : content ? (
+              <pre className="max-h-[320px] overflow-y-auto whitespace-pre-wrap rounded-lg border border-line bg-raised px-3 py-2.5 font-sans text-[11.5px] leading-5 text-ink-soft">
+                {content}
+              </pre>
+            ) : (
+              <p className="text-[11.5px] text-faint">
+                {loadingText ? '正在提取文字…' : '这个文件没有可提取的正文，可下载原件查看。'}
+              </p>
+            )}
           </section>
 
           <div className="grid gap-4 sm:grid-cols-2">
@@ -354,15 +497,21 @@ function KnowledgeDocDialog({
 
           <div className="flex items-start gap-2 rounded-lg bg-raised px-3 py-2.5 text-[11px] leading-5 text-muted">
             <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-success" />
-            助理回答时会标注来源与更新时间；受限内容只对被授权的成员引用。当前版本索引摘要，不加载原始文件正文。
+            助理回答时会标注来源与更新时间；检索使用审批通过后的完整正文，受限内容只对被授权的成员引用。
           </div>
         </DialogBody>
         <DialogFooter>
           <Button variant="secondary" onClick={onClose}>
             关闭
           </Button>
-          <Button variant="primary" onClick={() => onAsk(doc)}>
-            <MessageSquare size={13} /> 在大厅引用提问
+          <Button
+            variant="primary"
+            disabled={doc.status !== 'ready'}
+            title={doc.status !== 'ready' ? '审批通过后才能引用' : undefined}
+            onClick={() => onAsk(doc)}
+          >
+            <MessageSquare size={13} />
+            {doc.status === 'ready' ? '在大厅引用提问' : '等待审批'}
           </Button>
         </DialogFooter>
       </DialogContent>

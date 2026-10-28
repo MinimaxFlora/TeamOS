@@ -63,9 +63,55 @@ db.exec(`
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'chat',
+    text TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner_id);
 `)
 
 const seedPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'seed.json')
+
+function migrateUsersStatus() {
+  // Registration now creates pending accounts that an admin must approve.
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get()
+  if (!row || String(row.sql).includes("'pending'")) return
+  db.exec('PRAGMA foreign_keys = OFF')
+  try {
+    db.exec('BEGIN')
+    db.exec(`CREATE TABLE users_new (
+      id TEXT PRIMARY KEY,
+      member_id TEXT NOT NULL UNIQUE,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT,
+      role TEXT NOT NULL CHECK (role IN ('admin','member')),
+      status TEXT NOT NULL CHECK (status IN ('active','invited','pending','disabled')),
+      created_at TEXT NOT NULL,
+      last_login_at TEXT
+    )`)
+    db.exec(
+      'INSERT INTO users_new (id, member_id, email, password_hash, role, status, created_at, last_login_at) SELECT id, member_id, email, password_hash, role, status, created_at, last_login_at FROM users',
+    )
+    db.exec('DROP TABLE users')
+    db.exec('ALTER TABLE users_new RENAME TO users')
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON')
+  }
+}
+
+migrateUsersStatus()
 const fallbackState = {
   company: {
     name: '我的公司',
@@ -107,7 +153,19 @@ if (emptyState) {
   ).run(JSON.stringify(loadSeed()), new Date().toISOString())
 }
 
-for (const connector of getRawState().connectors ?? []) {
+// 没有账号的实例还没有用户数据；把早期演示种子替换成干净的初始状态，
+// 避免客户第一次登录就看到别人的公司与成员。
+const hasUsers = db.prepare('SELECT COUNT(*) AS n FROM users').get().n > 0
+if (!hasUsers) {
+  db.prepare('UPDATE app_state SET json = ?, revision = revision + 1, updated_at = ? WHERE id = 1').run(
+    JSON.stringify(loadSeed()),
+    new Date().toISOString(),
+  )
+  db.exec('DELETE FROM webhook_events')
+  db.exec('DELETE FROM connector_secrets')
+}
+
+for (const connector of getRawState().state.connectors ?? []) {
   const exists = db.prepare('SELECT 1 AS n FROM connector_secrets WHERE id = ?').get(connector.id)
   if (!exists) {
     db.prepare(
@@ -397,6 +455,11 @@ export function deleteUserSessions(userId) {
   db.prepare('DELETE FROM auth_sessions WHERE user_id = ?').run(userId)
 }
 
+export function deleteUser(id) {
+  db.prepare('DELETE FROM auth_sessions WHERE user_id = ?').run(id)
+  db.prepare('DELETE FROM users WHERE id = ?').run(id)
+}
+
 export function getSetting(key) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)
   if (!row) return null
@@ -422,6 +485,39 @@ function safeJson(value, fallback) {
   } catch {
     return fallback
   }
+}
+
+export function insertFile({ id, ownerId, name, mime, size, sha256, kind, purpose, text }) {
+  db.prepare(
+    `INSERT INTO files (id, owner_id, name, mime, size, sha256, kind, purpose, text, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, ownerId, name, mime, Number(size), sha256, kind, purpose ?? 'chat', text ?? null, new Date().toISOString())
+  return getFileRow(id)
+}
+
+export function getFileRow(id) {
+  return db.prepare('SELECT * FROM files WHERE id = ?').get(id) ?? null
+}
+
+export function updateFileRow(id, patch) {
+  const fields = []
+  const values = []
+  for (const [key, value] of Object.entries(patch)) {
+    if (!['name', 'text', 'kind', 'purpose'].includes(key)) continue
+    fields.push(`${key} = ?`)
+    values.push(value)
+  }
+  if (!fields.length) return
+  values.push(id)
+  db.prepare(`UPDATE files SET ${fields.join(', ')} WHERE id = ?`).run(...values)
+}
+
+export function deleteFileRow(id) {
+  db.prepare('DELETE FROM files WHERE id = ?').run(id)
+}
+
+export function allFiles() {
+  return db.prepare('SELECT * FROM files').all()
 }
 
 export { db }

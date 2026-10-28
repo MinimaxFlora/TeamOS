@@ -7,6 +7,7 @@ import {
   KeyRound,
   Loader2,
   Lock,
+  RefreshCw,
   Server,
   ShieldCheck,
   Zap,
@@ -399,9 +400,13 @@ const PROVIDER_PRESETS = [
 ]
 
 function gatewayTone(status?: string): { label: string; tone: 'success' | 'warning' | 'neutral' | 'danger' } {
-  if (status === 'running') return { label: 'Hermes 运行中', tone: 'success' }
+  // 服务端把健康检查通过记为 ready，早期 UI 只认 running，才出现了「Hermes 未启动」的误报。
+  if (status === 'ready' || status === 'running') return { label: 'Hermes 已就绪', tone: 'success' }
   if (status === 'starting') return { label: 'Hermes 启动中', tone: 'warning' }
-  if (status === 'error' || status === 'failed') return { label: 'Hermes 异常', tone: 'danger' }
+  if (status === 'error' || status === 'failed' || status === 'unavailable') {
+    return { label: 'Hermes 异常', tone: 'danger' }
+  }
+  if (status === 'disabled') return { label: 'Hermes 未启用', tone: 'neutral' }
   return { label: 'Hermes 未启动', tone: 'neutral' }
 }
 
@@ -415,6 +420,39 @@ function ModelSettingsCard() {
   const [testing, setTesting] = useState(false)
   const [error, setError] = useState('')
   const [testResult, setTestResult] = useState('')
+  const [models, setModels] = useState<string[]>([])
+  const [manualModel, setManualModel] = useState(false)
+  const [loadingModels, setLoadingModels] = useState(false)
+
+  const fetchModels = async (formOverride = form, forceManual = false) => {
+    if (forceManual) {
+      setManualModel(true)
+      return
+    }
+    setError('')
+    setLoadingModels(true)
+    try {
+      const result = await api.modelCatalog({
+        provider: formOverride.provider,
+        baseUrl: formOverride.baseUrl.trim(),
+        apiKey: formOverride.apiKey.trim(),
+      })
+      setModels(result.models)
+      setManualModel(false)
+      if (result.models.length && !result.models.includes(formOverride.model)) {
+        setForm((prev) => ({ ...prev, model: result.models[0] }))
+      }
+      if (!result.models.length) {
+        setError('服务商没有返回可用模型，请手动填写模型名称。')
+        setManualModel(true)
+      }
+    } catch (reason) {
+      setError(describeError(reason))
+      setManualModel(true)
+    } finally {
+      setLoadingModels(false)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -432,6 +470,19 @@ function ModelSettingsCard() {
           baseUrl: model.baseUrl || '',
           apiKey: '',
         })
+        // 已经存过密钥时，直接把服务商返回的模型列表准备好，管理员只需要下拉选择。
+        if (model.keySet) {
+          api
+            .modelCatalog({ provider, baseUrl: model.baseUrl || '', apiKey: '' })
+            .then((result) => {
+              if (cancelled || !result.models.length) return
+              setModels(result.models)
+              setManualModel(false)
+            })
+            .catch(() => {
+              // 拉取失败时保留手动填写，不影响保存已选模型。
+            })
+        }
       })
       .catch((reason) => {
         if (!cancelled) setError(describeError(reason))
@@ -452,6 +503,8 @@ function ModelSettingsCard() {
       baseUrl: preset?.baseUrl ?? '',
       apiKey: form.apiKey,
     })
+    setModels([])
+    setManualModel(false)
     setTestResult('')
   }
 
@@ -543,14 +596,67 @@ function ModelSettingsCard() {
                   ))}
                 </Select>
               </Field>
-              <Field label="模型名称" required htmlFor="model-name" hint="例如 deepseek-chat">
-                <Input
-                  id="model-name"
-                  value={form.model}
-                  onChange={(event) => setForm({ ...form, model: event.target.value })}
-                  placeholder="deepseek-chat"
-                  maxLength={120}
-                />
+              <Field
+                label="模型"
+                required
+                htmlFor="model-name"
+                hint={
+                  models.length && !manualModel
+                    ? `来自服务商，共 ${models.length} 个`
+                    : '先填 API Key，再拉取模型列表'
+                }
+              >
+                <div className="flex gap-2">
+                  {models.length && !manualModel ? (
+                    <Select
+                      id="model-name"
+                      value={form.model}
+                      onChange={(event) => setForm({ ...form, model: event.target.value })}
+                      className="flex-1"
+                    >
+                      {!models.includes(form.model) && form.model ? (
+                        <option value={form.model}>{form.model}（当前）</option>
+                      ) : null}
+                      {models.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </Select>
+                  ) : (
+                    <Input
+                      id="model-name"
+                      value={form.model}
+                      onChange={(event) => setForm({ ...form, model: event.target.value })}
+                      placeholder="deepseek-chat"
+                      maxLength={120}
+                      className="flex-1"
+                    />
+                  )}
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    type="button"
+                    onClick={() => void fetchModels(form, false)}
+                    disabled={loadingModels}
+                  >
+                    {loadingModels ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <RefreshCw size={13} />
+                    )}
+                    {loadingModels ? '拉取中…' : '拉取列表'}
+                  </Button>
+                </div>
+                {models.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setManualModel((value) => !value)}
+                    className="mt-1 text-[10.5px] text-accent-strong hover:underline"
+                  >
+                    {manualModel ? '改回从列表选择' : '列表里没有？手动填写模型名称'}
+                  </button>
+                )}
               </Field>
             </div>
 

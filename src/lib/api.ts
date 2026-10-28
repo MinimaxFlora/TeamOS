@@ -21,6 +21,8 @@ export interface SessionUser {
 export interface AuthResponse {
   authenticated: boolean
   setupRequired?: boolean
+  pending?: boolean
+  message?: string
   user?: SessionUser
   state?: AppState
   revision?: number
@@ -82,7 +84,63 @@ export interface ChatDonePayload {
   cost?: number
 }
 
+export interface UploadedFile {
+  id: string
+  name: string
+  mime: string
+  size: number
+  kind: 'image' | 'doc' | 'pdf' | 'sheet' | 'slides' | 'audio' | 'other'
+  purpose: 'chat' | 'knowledge' | 'audio'
+  ownerId: string
+  hasText: boolean
+  createdAt: string
+}
+
+export interface KnowledgeDocResult {
+  ok: boolean
+  doc?: KnowledgeDocLike
+  state?: AppState
+  revision?: number
+}
+
+export interface KnowledgeDocLike {
+  id: string
+  spaceId: string
+  title: string
+  summary: string
+  content?: string
+  tags: string[]
+  status?: string
+  fileId?: string
+  fileName?: string
+  expiresAt?: string | null
+  [key: string]: unknown
+}
+
 const JSON_HEADERS = { 'content-type': 'application/json' }
+
+async function uploadRaw(path: string, file: Blob, name: string): Promise<UploadedFile> {
+  const response = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      accept: 'application/json',
+      'content-type': file.type || 'application/octet-stream',
+    },
+    body: file,
+  })
+  const text = await response.text()
+  let payload: { error?: string; file?: UploadedFile } | null = null
+  try {
+    payload = text ? JSON.parse(text) : null
+  } catch {
+    payload = null
+  }
+  if (!response.ok || !payload?.file) {
+    throw new ApiError(response.status, payload?.error || `上传失败（${response.status}）${name ? `：${name}` : ''}`)
+  }
+  return payload.file
+}
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -125,14 +183,7 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
 
-  register: (input: {
-    name: string
-    email: string
-    password: string
-    jobTitle: string
-    department: string
-    companyName?: string
-  }) =>
+  register: (input: { account: string; password: string }) =>
     request<AuthResponse>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify(input),
@@ -193,10 +244,98 @@ export const api = {
 
   patchMember: (
     id: string,
-    patch: Partial<Pick<Member, 'jobTitle' | 'department' | 'role' | 'status' | 'bio'>>,
+    patch: Partial<Pick<Member, 'name' | 'jobTitle' | 'department' | 'role' | 'status' | 'bio'>>,
   ) =>
     request<{ ok: boolean; member: Member; state: AppState; revision: number }>(
       `/api/members/${encodeURIComponent(id)}`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    ),
+
+  deleteMember: (id: string) =>
+    request<{ ok: boolean; state: AppState; revision: number }>(
+      `/api/members/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
+
+  modelCatalog: (input: { provider: string; baseUrl?: string; apiKey?: string }) =>
+    request<{ ok: boolean; models: string[] }>('/api/model/catalog', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  uploadFile: (file: Blob, name: string, purpose: 'chat' | 'knowledge' | 'audio') =>
+    uploadRaw(
+      `/api/files?purpose=${purpose}&name=${encodeURIComponent(name)}`,
+      file,
+      name,
+    ),
+
+  fileUrl: (id: string, inline = false) =>
+    `/api/files/${encodeURIComponent(id)}${inline ? '?inline=1' : ''}`,
+
+  downloadFile: async (id: string, name: string) => {
+    const response = await fetch(`/api/files/${encodeURIComponent(id)}`, {
+      credentials: 'same-origin',
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      let message = `下载失败（${response.status}）`
+      try {
+        message = JSON.parse(text).error || message
+      } catch {
+        // keep default
+      }
+      throw new ApiError(response.status, message)
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = name
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 4000)
+  },
+
+  deleteFile: (id: string) =>
+    request<{ ok: boolean }>(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  fileText: (id: string) =>
+    request<{ ok: boolean; text: string; file: UploadedFile }>(
+      `/api/files/${encodeURIComponent(id)}/text`,
+    ),
+
+  proposeFile: (id: string, input: { title?: string; summary?: string; spaceId?: string; tags?: string[]; restricted?: boolean }) =>
+    request<KnowledgeDocResult>(`/api/files/${encodeURIComponent(id)}/propose`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  transcribeFile: (id: string) =>
+    request<{ ok: boolean; text: string; durationSec: number }>(
+      `/api/files/${encodeURIComponent(id)}/transcribe`,
+      { method: 'POST' },
+    ),
+
+  approveKnowledge: (id: string) =>
+    request<{ ok: boolean; state: AppState; revision: number }>(
+      `/api/knowledge/${encodeURIComponent(id)}/approve`,
+      { method: 'POST' },
+    ),
+
+  rejectKnowledge: (id: string) =>
+    request<{ ok: boolean; state: AppState; revision: number }>(
+      `/api/knowledge/${encodeURIComponent(id)}/reject`,
+      { method: 'POST' },
+    ),
+
+  patchKnowledge: (
+    id: string,
+    patch: { title?: string; summary?: string; content?: string; tags?: string[]; restricted?: boolean; spaceId?: string },
+  ) =>
+    request<{ ok: boolean; doc: KnowledgeDocLike; state: AppState; revision: number }>(
+      `/api/knowledge/${encodeURIComponent(id)}`,
       { method: 'PATCH', body: JSON.stringify(patch) },
     ),
 
@@ -226,10 +365,12 @@ export const api = {
     }),
 
   testConnector: (id: string) =>
-    request<{ ok: boolean; eventId: string; state: AppState; revision: number }>(
-      `/api/connectors/${id}/test`,
-      { method: 'POST' },
-    ),
+    request<{
+      ok: boolean
+      delivery: { ok: boolean; status: number; latencyMs: number; message: string }
+      state: AppState
+      revision: number
+    }>(`/api/connectors/${id}/test`, { method: 'POST' }),
 
   connectorEvents: (id: string) =>
     request<{
@@ -259,6 +400,7 @@ export interface ChatStreamHandlers {
   onMeta?: (data: { sources: SourceRef[]; knowledgeCount: number }) => void
   onDelta?: (text: string) => void
   onTool?: (data: { label: string; detail: string }) => void
+  onNote?: (data: { text: string; docId?: string }) => void
   onDone?: (data: ChatDonePayload) => void
   onError?: (message: string) => void
 }
@@ -270,6 +412,7 @@ export async function streamChat(
     message: string
     runId?: string
     messageId?: string
+    attachmentIds?: string[]
     history?: { role: 'user' | 'assistant'; content: string }[]
   },
   handlers: ChatStreamHandlers,
@@ -325,6 +468,9 @@ export async function streamChat(
         break
       case 'tool':
         handlers.onTool?.(data as { label: string; detail: string })
+        break
+      case 'note':
+        handlers.onNote?.(data as { text: string; docId?: string })
         break
       case 'done':
         handlers.onDone?.(data as ChatDonePayload)

@@ -20,7 +20,8 @@ export function stateForUser(user) {
       (meeting) => !meeting.confidential || meeting.participantIds.includes(memberId),
     )
     state.knowledgeDocs = (state.knowledgeDocs ?? []).filter(
-      (doc) => !doc.restricted || doc.ownerId === memberId,
+      // 待审批的归档只有提交人能看到；已审批的受限文档也只给作者。
+      (doc) => doc.ownerId === memberId || (doc.status === 'ready' && !doc.restricted),
     )
     state.runs = (state.runs ?? []).filter(
       (run) => run.actorId === memberId || run.status === 'running',

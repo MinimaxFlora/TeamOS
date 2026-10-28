@@ -80,6 +80,43 @@ function providerBase(model) {
   return (model.baseUrl || providerInfo(model.provider).base || '').replace(/\/+$/, '')
 }
 
+/**
+ * Ask the provider which models the entered key can use, so the admin picks from
+ * a list instead of typing an exact model id.
+ */
+export async function listProviderModels({ provider, baseUrl, apiKey }) {
+  const info = providerInfo(String(provider || '').trim().toLowerCase())
+  const stored = modelConfig()
+  const base = String(baseUrl || '').trim().replace(/\/+$/, '') || info.base || providerBase(stored)
+  const key = String(apiKey || '').trim() || stored.apiKey
+  if (!base) throw new Error('这个服务商需要先填写 Base URL')
+  if (!key) throw new Error('请先填写 API Key')
+  const headers = { accept: 'application/json' }
+  if (info.provider === 'anthropic') {
+    headers['x-api-key'] = key
+    headers['anthropic-version'] = '2023-06-01'
+  } else {
+    headers.authorization = `Bearer ${key}`
+  }
+  let response
+  try {
+    response = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(20000) })
+  } catch (error) {
+    throw new Error(`无法连接模型服务：${error.message}`)
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`获取模型列表失败：HTTP ${response.status} ${redact(text).slice(0, 200)}`)
+  }
+  const data = await response.json().catch(() => null)
+  const list = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : []
+  const ids = list
+    .map((item) => (typeof item === 'string' ? item : item?.id || item?.name || ''))
+    .filter((id) => typeof id === 'string' && id.trim())
+    .map((id) => id.trim())
+  return [...new Set(ids)].sort((left, right) => left.localeCompare(right))
+}
+
 function updateHermesFiles(model) {
   const info = providerInfo(model.provider)
   fs.mkdirSync(config.hermes.home, { recursive: true })
@@ -440,7 +477,7 @@ export async function testModel() {
       { role: 'system', content: 'You are a health check. Reply with exactly OK.' },
       { role: 'user', content: 'ping' },
     ],
-    { maxTokens: 16, temperature: 0 },
+    { maxTokens: 256, temperature: 0 },
   )
   return {
     ok: true,

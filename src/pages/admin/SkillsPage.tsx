@@ -3,6 +3,11 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
+  FileText,
+  FileUp,
+  Library,
+  Loader2,
+  Pencil,
   Plus,
   Power,
   Search,
@@ -46,7 +51,7 @@ const PERMISSION_OPTIONS = [
 ]
 
 export function AdminSkillsPage() {
-  const { state, currentUser, notify, createSkill, deleteSkill, setSkillStatus } = useStore()
+  const { state, currentUser, notify, createSkill, deleteSkill, setSkillStatus, updateSkill } = useStore()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [query, setQuery] = useState('')
@@ -54,6 +59,7 @@ export function AdminSkillsPage() {
   const [category, setCategory] = useState('all')
   const [source, setSource] = useState('all')
   const [addOpen, setAddOpen] = useState(false)
+  const [libraryOpen, setLibraryOpen] = useState(false)
   const [action, setAction] = useState<{ type: 'reject' | 'disable' | 'delete'; skill: Skill } | null>(null)
 
   const selectedSkill = state.skills.find((skill) => skill.id === searchParams.get('skill')) ?? null
@@ -100,9 +106,14 @@ export function AdminSkillsPage() {
         title="Skills 中心"
         description="技能是可执行扩展。导入或自建后先进入审核，确认权限、来源与风险后，才能绑定给助理。"
         actions={
-          <Button variant="primary" size="sm" onClick={() => setAddOpen(true)}>
-            <Plus size={14} /> 添加 Skill
-          </Button>
+          <>
+            <Button variant="secondary" size="sm" onClick={() => setLibraryOpen(true)}>
+              <Library size={14} /> 技能仓库
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => setAddOpen(true)}>
+              <Plus size={14} /> 添加 Skill
+            </Button>
+          </>
         }
       />
 
@@ -323,7 +334,7 @@ export function AdminSkillsPage() {
 
       <p className="mt-3 flex items-start gap-1.5 text-[10.5px] leading-5 text-faint">
         <ShieldCheck size={11} className="mt-0.5 shrink-0" />
-        技能目前作为助理的提示与工作流配置使用，不会下载或执行第三方代码；接入可执行 Skill 前需要隔离运行域、签名校验与资源配额。
+        Skill 的 SKILL.md 会作为助理的提示与工作流说明使用，不会执行文件里的代码。仓库导入的技能保留原文与来源链接，方便审计与更新。
       </p>
 
       <AddSkillDialog
@@ -340,11 +351,19 @@ export function AdminSkillsPage() {
         notify={notify}
       />
 
+      <SkillLibraryDialog
+        open={libraryOpen}
+        onOpenChange={setLibraryOpen}
+        existing={state.skills}
+        createSkill={createSkill}
+      />
+
       <SkillDetailDialog
         skill={selectedSkill}
         onClose={closeSkill}
         onOpenAgent={(id) => navigate(`/admin/agents/${id}`)}
         onRequestAction={(type, skill) => setAction({ type, skill })}
+        onUpdate={updateSkill}
       />
 
       <ConfirmDialog
@@ -404,6 +423,9 @@ function AddSkillDialog({
   const [version, setVersion] = useState('0.1.0')
   const [risk, setRisk] = useState<Risk>('medium')
   const [permissions, setPermissions] = useState<string[]>([])
+  const [content, setContent] = useState('')
+  const [fileName, setFileName] = useState('')
+  const [reading, setReading] = useState(false)
 
   const reset = () => {
     setName('')
@@ -413,11 +435,55 @@ function AddSkillDialog({
     setVersion('0.1.0')
     setRisk('medium')
     setPermissions([])
+    setContent('')
+    setFileName('')
+  }
+
+  const readFile = async (file: File | null) => {
+    if (!file) return
+    if (file.size > 2 * 1024 * 1024) {
+      notify('文件超过 2 MB', { description: 'SKILL.md 通常只有几 KB，请确认文件是否正确。', tone: 'warning' })
+      return
+    }
+    setReading(true)
+    try {
+      const text = await file.text()
+      setContent(text)
+      setFileName(file.name)
+      const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
+      const pick = (key: string) => {
+        const match = new RegExp(`^${key}:\\s*(.+)$`, 'm').exec(frontmatter?.[1] ?? '')
+        return match?.[1]?.replace(/^["']|["']$/g, '').trim()
+      }
+      const metaName = pick('name')
+      const metaDescription = pick('description')
+      if (metaName && !name.trim()) setName(metaName)
+      if (!metaName && !name.trim()) setName(file.name.replace(/\.md$/i, ''))
+      if (metaDescription && !description.trim()) setDescription(metaDescription)
+      if (!metaDescription && !description.trim()) {
+        const paragraph = text
+          .replace(/^---[\s\S]*?---/, '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find((line) => line && !line.startsWith('#'))
+        if (paragraph) setDescription(paragraph.slice(0, 300))
+      }
+      const metaVersion = pick('version')
+      if (metaVersion) setVersion(metaVersion)
+    } catch {
+      notify('读取文件失败', { tone: 'danger' })
+    } finally {
+      setReading(false)
+    }
   }
 
   const handleCreate = () => {
-    if (!name.trim() || !description.trim()) {
-      notify('请填写 Skill 名称与说明。', { tone: 'warning' })
+    if (!name.trim()) {
+      notify('请填写 Skill 名称。', { tone: 'warning' })
+      return
+    }
+    if (!description.trim() && !content.trim()) {
+      notify('请填写能力说明，或上传 / 粘贴 SKILL.md 正文。', { tone: 'warning' })
       return
     }
     if (existing.some((skill) => skill.name === name.trim())) {
@@ -426,12 +492,14 @@ function AddSkillDialog({
     }
     const id = createSkill({
       name,
-      description,
+      description: description.trim() || content.slice(0, 300),
       category,
       source,
       version,
       risk,
       permissions,
+      content,
+      sourceUrl: undefined,
     })
     reset()
     onOpenChange(false)
@@ -473,14 +541,49 @@ function AddSkillDialog({
             </Field>
           </div>
 
-          <Field label="能力说明" required htmlFor="skill-desc" hint={`${description.length}/160`}>
+          <Field
+            label="能力说明"
+            required
+            htmlFor="skill-desc"
+            hint={`${description.length} 字 · 会显示在技能列表里`}
+          >
             <Textarea
               id="skill-desc"
               value={description}
-              onChange={(event) => setDescription(event.target.value.slice(0, 160))}
+              onChange={(event) => setDescription(event.target.value)}
               rows={3}
               placeholder="它能做什么、输入输出是什么、什么时候不该用。"
             />
+          </Field>
+
+          <Field
+            label="SKILL.md 正文"
+            hint={fileName ? `${fileName} · ${content.length} 字` : '可以上传 .md 文件，也可以直接粘贴'}
+          >
+            <div className="space-y-2">
+              <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-line-strong bg-raised px-3 py-2 text-[11.5px] text-muted hover:border-accent">
+                {reading ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <FileUp size={13} />
+                )}
+                <span className="truncate">
+                  {fileName || (reading ? '正在读取…' : '选择 SKILL.md 文件（自动提取名称与说明）')}
+                </span>
+                <input
+                  type="file"
+                  accept=".md,.markdown,.txt"
+                  className="hidden"
+                  onChange={(event) => void readFile(event.target.files?.[0] ?? null)}
+                />
+              </label>
+              <Textarea
+                value={content}
+                onChange={(event) => setContent(event.target.value)}
+                className="min-h-[180px] font-mono text-[11.5px] leading-5"
+                placeholder={'---\nname: meeting-notes\ndescription: 把会议记录整理成摘要、决议和行动项\n---\n\n# 会议纪要\n\n## 工作流\n1. …'}
+              />
+            </div>
           </Field>
 
           <div className="grid gap-3 sm:grid-cols-2">
@@ -580,19 +683,242 @@ function AddSkillDialog({
   )
 }
 
+interface LibrarySkill {
+  name: string
+  description: string
+  slug: string
+  sourceRepo: string
+  sourceUrl: string
+  content: string
+  license: string
+  version: string
+  category: string
+  risk: Risk
+}
+
+function SkillLibraryDialog({
+  open,
+  onOpenChange,
+  existing,
+  createSkill,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  existing: Skill[]
+  createSkill: ReturnType<typeof useStore>['createSkill']
+}) {
+  const [library, setLibrary] = useState<{ sources: { label: string; url: string }[]; skills: LibrarySkill[] } | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('all')
+  const [sourceFilter, setSourceFilter] = useState('all')
+  const [recent, setRecent] = useState<string[]>([])
+
+  useEffect(() => {
+    if (!open || library) return
+    let cancelled = false
+    setLoading(true)
+    setError('')
+    fetch('/skill-library.json')
+      .then((response) => {
+        if (!response.ok) throw new Error(`读取失败（${response.status}）`)
+        return response.json()
+      })
+      .then((data) => {
+        if (!cancelled) setLibrary(data)
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : '读取失败')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, library])
+
+  const skills = library?.skills ?? []
+  const existingNames = new Set(existing.map((skill) => skill.name))
+  const categories = Array.from(new Set(skills.map((skill) => skill.category)))
+  const sources = library?.sources ?? []
+
+  const visible = skills
+    .filter((skill) => category === 'all' || skill.category === category)
+    .filter((skill) => sourceFilter === 'all' || skill.sourceRepo === sourceFilter)
+    .filter((skill) => {
+      const needle = query.trim().toLowerCase()
+      if (!needle) return true
+      return `${skill.name} ${skill.description} ${skill.category}`.toLowerCase().includes(needle)
+    })
+
+  const importSkill = (skill: LibrarySkill) => {
+    if (existingNames.has(skill.name)) return
+    createSkill({
+      name: skill.name,
+      description: skill.description,
+      category: skill.category,
+      source: 'imported',
+      version: skill.version,
+      risk: skill.risk,
+      permissions: [],
+      content: skill.content,
+      sourceUrl: skill.sourceUrl,
+      sourceLabel: `Skills Hub · ${skill.sourceRepo}`,
+      author: skill.sourceRepo.split('/')[0],
+      license: skill.license,
+    })
+    setRecent((prev) => [skill.name, ...prev].slice(0, 8))
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent size="xl">
+        <DialogHeader
+          title="技能仓库"
+          description={`来自 ${sources.map((item) => item.label).join('、') || '公开仓库'}，已按名称与描述去重。导入后进入待审核队列。`}
+          icon={Library}
+        />
+        <DialogBody className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-full max-w-[260px]">
+              <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索技能名称或说明"
+                aria-label="搜索技能仓库"
+                className="h-8 w-full rounded-lg border border-line bg-surface pl-7 pr-2.5 text-[12px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/10"
+              />
+            </div>
+            <Select
+              value={category}
+              onChange={(event) => setCategory(event.target.value)}
+              className="h-8 w-[128px] text-[11.5px]"
+              aria-label="按分类筛选仓库"
+            >
+              <option value="all">全部分类</option>
+              {categories.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </Select>
+            <Select
+              value={sourceFilter}
+              onChange={(event) => setSourceFilter(event.target.value)}
+              className="h-8 w-[148px] text-[11.5px]"
+              aria-label="按来源筛选仓库"
+            >
+              <option value="all">全部来源</option>
+              {sources.map((item) => (
+                <option key={item.label} value={item.label}>
+                  {item.label}
+                </option>
+              ))}
+            </Select>
+            <span className="ml-auto text-[10.5px] text-faint">
+              {loading ? '正在读取技能仓库…' : `${visible.length} / ${skills.length} 个技能`}
+            </span>
+          </div>
+
+          {recent.length > 0 && (
+            <div className="rounded-lg border border-success/25 bg-success-soft px-3 py-2 text-[11px] text-success">
+              已导入：{recent.join('、')}，可以在列表里审核启用。
+            </div>
+          )}
+
+          {error && (
+            <p className="rounded-lg bg-danger-soft px-3 py-2 text-[11.5px] text-danger">{error}</p>
+          )}
+
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-12 text-[12px] text-muted">
+              <Loader2 size={14} className="animate-spin" /> 正在加载技能仓库…
+            </div>
+          ) : (
+            <div className="max-h-[52vh] divide-y divide-line overflow-y-auto rounded-lg border border-line">
+              {visible.slice(0, 200).map((skill) => {
+                const exists = existingNames.has(skill.name)
+                return (
+                  <div key={`${skill.sourceRepo}/${skill.slug}`} className="flex items-start gap-3 px-3 py-2.5">
+                    <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-sunken text-ink-soft">
+                      <FileUp size={13} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[12px] font-medium text-ink">{skill.name}</span>
+                        <Badge tone="outline">{skill.category}</Badge>
+                        <RiskBadge risk={skill.risk} />
+                      </div>
+                      <p className="mt-0.5 line-clamp-2 text-[10.5px] leading-4 text-muted">
+                        {skill.description}
+                      </p>
+                      <p className="mt-0.5 text-[9.5px] text-faint">
+                        {skill.sourceRepo} · {skill.license}
+                        {skill.sourceUrl && (
+                          <>
+                            {' · '}
+                            <a
+                              href={skill.sourceUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-accent hover:underline"
+                            >
+                              查看原文
+                            </a>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={exists ? 'ghost' : 'secondary'}
+                      disabled={exists}
+                      onClick={() => importSkill(skill)}
+                    >
+                      {exists ? '已导入' : <><Plus size={12} /> 导入</>}
+                    </Button>
+                  </div>
+                )
+              })}
+              {visible.length === 0 && (
+                <div className="px-3 py-10 text-center text-[11.5px] text-faint">没有匹配的技能。</div>
+              )}
+            </div>
+          )}
+
+          <p className="text-[10px] leading-4 text-faint">
+            仓库技能来自公开 GitHub 仓库，导入时保留原文与来源链接；启用前请核对权限与风险，助理只把 SKILL.md 当指令，不会执行其中的代码。
+          </p>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => onOpenChange(false)}>
+            关闭
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function SkillDetailDialog({
   skill,
   onClose,
   onOpenAgent,
   onRequestAction,
+  onUpdate,
 }: {
   skill: Skill | null
   onClose: () => void
   onOpenAgent: (id: string) => void
   onRequestAction: (type: 'reject' | 'disable' | 'delete', skill: Skill) => void
+  onUpdate: ReturnType<typeof useStore>['updateSkill']
 }) {
   const { state, setSkillStatus } = useStore()
   const [ack, setAck] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
 
   useEffect(() => {
     setAck(false)
@@ -627,6 +953,35 @@ function SkillDetailDialog({
           </div>
 
           <p className="text-[13px] leading-6 text-ink-soft">{skill.description}</p>
+
+          {skill.sourceUrl && (
+            <p className="text-[10.5px] text-faint">
+              来源：
+              <a href={skill.sourceUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                {skill.sourceUrl}
+              </a>
+            </p>
+          )}
+
+          <section>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="flex items-center gap-1.5 text-[12px] font-semibold text-ink">
+                <FileText size={13} /> SKILL.md
+              </h3>
+              <Button size="sm" variant="ghost" onClick={() => setEditOpen(true)}>
+                <Pencil size={12} /> 编辑
+              </Button>
+            </div>
+            {skill.content ? (
+              <pre className="max-h-[280px] overflow-y-auto whitespace-pre-wrap rounded-lg border border-line bg-raised px-3 py-2.5 font-sans text-[11.5px] leading-5 text-ink-soft">
+                {skill.content}
+              </pre>
+            ) : (
+              <p className="rounded-lg bg-raised px-3 py-2.5 text-[11.5px] text-faint">
+                还没有正文，点「编辑」上传或粘贴 SKILL.md。
+              </p>
+            )}
+          </section>
 
           <section>
             <h3 className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold text-ink">
@@ -738,6 +1093,131 @@ function SkillDetailDialog({
               )}
             </>
           )}
+        </DialogFooter>
+      </DialogContent>
+      {editOpen && (
+        <EditSkillDialog
+          skill={skill}
+          onClose={() => setEditOpen(false)}
+          onSave={onUpdate}
+        />
+      )}
+    </Dialog>
+  )
+}
+
+function EditSkillDialog({
+  skill,
+  onClose,
+  onSave,
+}: {
+  skill: Skill
+  onClose: () => void
+  onSave: ReturnType<typeof useStore>['updateSkill']
+}) {
+  const [name, setName] = useState(skill.name)
+  const [description, setDescription] = useState(skill.description)
+  const [category, setCategory] = useState(skill.category)
+  const [version, setVersion] = useState(skill.version)
+  const [risk, setRisk] = useState<Risk>(skill.risk)
+  const [permissions, setPermissions] = useState<string[]>(skill.permissions)
+  const [content, setContent] = useState(skill.content ?? '')
+
+  const save = () => {
+    if (!name.trim()) return
+    onSave(skill.id, {
+      name: name.trim(),
+      description: description.trim(),
+      category,
+      version: version.trim() || skill.version,
+      risk,
+      permissions,
+      content,
+    })
+    onClose()
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent size="lg">
+        <DialogHeader title={`编辑 · ${skill.name}`} icon={Pencil} />
+        <DialogBody className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px]">
+            <Field label="名称" required htmlFor="edit-skill-name">
+              <Input id="edit-skill-name" value={name} onChange={(event) => setName(event.target.value)} />
+            </Field>
+            <Field label="版本" htmlFor="edit-skill-version">
+              <Input id="edit-skill-version" value={version} onChange={(event) => setVersion(event.target.value)} />
+            </Field>
+          </div>
+          <Field label="能力说明" htmlFor="edit-skill-desc" hint={`${description.length} 字`}>
+            <Textarea
+              id="edit-skill-desc"
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              className="min-h-[80px]"
+            />
+          </Field>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="分类" htmlFor="edit-skill-category">
+              <Select id="edit-skill-category" value={category} onChange={(event) => setCategory(event.target.value)}>
+                {SKILL_CATEGORIES.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="风险等级" htmlFor="edit-skill-risk">
+              <Select
+                id="edit-skill-risk"
+                value={risk}
+                onChange={(event) => setRisk(event.target.value as Risk)}
+              >
+                <option value="low">低风险</option>
+                <option value="medium">需留意</option>
+                <option value="high">高风险</option>
+              </Select>
+            </Field>
+          </div>
+          <Field label="SKILL.md 正文" hint={`${content.length} 字`}>
+            <Textarea
+              value={content}
+              onChange={(event) => setContent(event.target.value)}
+              className="min-h-[220px] font-mono text-[11.5px] leading-5"
+            />
+          </Field>
+          <div>
+            <div className="mb-1.5 text-[13px] font-medium text-ink-soft">申请的权限</div>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {PERMISSION_OPTIONS.map((permission) => (
+                <label
+                  key={permission}
+                  className="flex cursor-pointer items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1.5 text-[11.5px] text-ink-soft hover:bg-raised"
+                >
+                  <Checkbox
+                    checked={permissions.includes(permission)}
+                    onChange={(event) =>
+                      setPermissions((prev) =>
+                        event.target.checked
+                          ? [...prev, permission]
+                          : prev.filter((item) => item !== permission),
+                      )
+                    }
+                  />
+                  {permission}
+                </label>
+              ))}
+            </div>
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose}>
+            取消
+          </Button>
+          <Button variant="primary" onClick={save} disabled={!name.trim()}>
+            <Check size={13} /> 保存
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

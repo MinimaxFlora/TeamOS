@@ -1,5 +1,7 @@
 import {
+  Briefcase,
   Building2,
+  Check,
   ChevronRight,
   Mail,
   MessagesSquare,
@@ -7,6 +9,7 @@ import {
   ShieldCheck,
   UserPlus,
   UsersRound,
+  X,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
@@ -19,6 +22,7 @@ import { PageBody, PageHeader } from '../../components/layout/PageHeader'
 import { Avatar } from '../../components/ui/avatar'
 import { Badge, StatusPill } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
+import { ConfirmDialog } from '../../components/ui/confirm-dialog'
 import {
   Dialog,
   DialogBody,
@@ -30,19 +34,22 @@ import { EmptyState } from '../../components/ui/empty-state'
 import { Field, Input, Select } from '../../components/ui/input'
 
 export function AdminMembersPage() {
-  const { state, currentUser } = useStore()
+  const { state, currentUser, updateCompany, notify } = useStore()
   const [searchParams, setSearchParams] = useSearchParams()
   const [query, setQuery] = useState('')
   const [department, setDepartment] = useState('all')
   const [role, setRole] = useState<'all' | Role>('all')
   const [status, setStatus] = useState<'all' | Member['status']>('all')
+  const [positionsOpen, setPositionsOpen] = useState(false)
 
   const selected = state.members.find((member) => member.id === searchParams.get('member')) ?? null
   const inviteOpen = searchParams.get('invite') === '1'
   const adminCount = state.members.filter((member) => member.role === 'admin').length
   const activeMembers = state.members.filter((member) => member.status === 'active')
   const invited = state.members.filter((member) => member.status === 'invited')
+  const pendingMembers = state.members.filter((member) => member.status === 'pending')
   const departments = new Set(activeMembers.map((member) => member.department))
+  const positions = state.company.positions ?? []
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -91,16 +98,43 @@ export function AdminMembersPage() {
         title="成员与岗位"
         description="每位员工都能注册并维护自己的岗位。管理员可以调整岗位、部门与角色；岗位会显示在公司大厅和成员目录里。"
         actions={
-          <Button size="sm" variant="primary" onClick={() => setInviteOpen(true)}>
-            <UserPlus size={14} /> 邀请成员
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setPositionsOpen(true)}>
+              <Briefcase size={14} /> 岗位设置
+            </Button>
+            <Button size="sm" variant="primary" onClick={() => setInviteOpen(true)}>
+              <UserPlus size={14} /> 邀请成员
+            </Button>
+          </div>
         }
       />
+
+      {pendingMembers.length > 0 && (
+        <section className="mb-4 overflow-hidden rounded-xl border border-warning/25 bg-warning-soft/40">
+          <div className="flex items-center gap-2 border-b border-warning/20 px-4 py-2.5">
+            <UserPlus size={14} className="text-warning" />
+            <h2 className="text-[12.5px] font-semibold text-ink">
+              待审批注册 · {pendingMembers.length}
+            </h2>
+            <span className="text-[10.5px] text-muted">员工自助注册后必须通过审批才能登录</span>
+          </div>
+          <div className="divide-y divide-warning/15">
+            {pendingMembers.map((member) => (
+              <PendingRow key={member.id} member={member} positions={positions} />
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="mb-5 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
         {[
           { label: '在职成员', value: activeMembers.length, icon: UsersRound, hint: `${state.members.length} 条成员记录` },
-          { label: '待加入', value: invited.length, icon: UserPlus, hint: '接受邀请后进入工作区' },
+          {
+            label: '待处理',
+            value: invited.length + pendingMembers.length,
+            icon: UserPlus,
+            hint: `${pendingMembers.length} 个注册申请待审批`,
+          },
           { label: '管理员', value: adminCount, icon: ShieldCheck, hint: '可进入管理后台' },
           { label: '覆盖部门', value: departments.size, icon: Building2, hint: '按部门组织岗位' },
         ].map((item) => (
@@ -135,6 +169,7 @@ export function AdminMembersPage() {
             [
               ['all', `全部 ${state.members.length}`],
               ['active', `在职 ${activeMembers.length}`],
+              ['pending', `待审批 ${pendingMembers.length}`],
               ['invited', `待加入 ${invited.length}`],
             ] as const
           ).map(([key, label]) => (
@@ -270,8 +305,206 @@ export function AdminMembersPage() {
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
         existing={state.members}
+        positions={positions}
+      />
+
+      <PositionsDialog
+        open={positionsOpen}
+        onClose={() => setPositionsOpen(false)}
+        positions={positions}
+        onChange={(next) => {
+          updateCompany({ positions: next })
+          notify('岗位已更新', { description: '新岗位会出现在成员资料与助理配置里。', tone: 'success' })
+        }}
       />
     </PageBody>
+  )
+}
+
+function PendingRow({ member, positions }: { member: Member; positions: string[] }) {
+  const { updateMember, deleteMember, notify } = useStore()
+  const [jobTitle, setJobTitle] = useState(positions[0] ?? '待分配')
+  const [department, setDepartment] = useState(DEPARTMENTS[0])
+  const [busy, setBusy] = useState(false)
+  const [rejectOpen, setRejectOpen] = useState(false)
+
+  const approve = async () => {
+    setBusy(true)
+    try {
+      const result = await updateMember(member.id, {
+        status: 'active',
+        jobTitle,
+        department,
+      })
+      if (!result.ok) {
+        notify('审批失败', { description: result.error, tone: 'danger' })
+        return
+      }
+      notify('已通过注册申请', {
+        description: `${member.name} 现在可以用注册时的账号密码登录公司大厅。`,
+        tone: 'success',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const reject = async () => {
+    setBusy(true)
+    try {
+      const result = await deleteMember(member.id)
+      if (!result.ok) {
+        notify('拒绝失败', { description: result.error, tone: 'danger' })
+        return
+      }
+      notify('已拒绝注册申请', { description: `${member.name} 的申请已删除。`, tone: 'success' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+      <Avatar name={member.name} color={member.color} size="md" />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="truncate text-[12.5px] font-medium text-ink">{member.name}</span>
+          <StatusPill status="pending" />
+        </div>
+        <div className="truncate text-[10.5px] text-faint">
+          {member.email} · 申请于 {formatRelative(member.joinedAt)}
+        </div>
+      </div>
+      <label className="flex items-center gap-1.5 text-[10.5px] text-muted">
+        岗位
+        <Select
+          value={jobTitle}
+          onChange={(event) => setJobTitle(event.target.value)}
+          className="h-8 w-[120px] text-[11.5px]"
+          aria-label={`为 ${member.name} 选择岗位`}
+        >
+          {[...new Set([jobTitle, ...positions])].filter(Boolean).map((item) => (
+            <option key={item} value={item}>
+              {item}
+            </option>
+          ))}
+          <option value="待分配">待分配</option>
+        </Select>
+      </label>
+      <label className="flex items-center gap-1.5 text-[10.5px] text-muted">
+        部门
+        <Select
+          value={department}
+          onChange={(event) => setDepartment(event.target.value)}
+          className="h-8 w-[110px] text-[11.5px]"
+          aria-label={`为 ${member.name} 选择部门`}
+        >
+          {DEPARTMENTS.map((item) => (
+            <option key={item} value={item}>
+              {item}
+            </option>
+          ))}
+        </Select>
+      </label>
+      <div className="flex items-center gap-1.5">
+        <Button size="sm" variant="primary" onClick={() => void approve()} disabled={busy}>
+          <Check size={13} /> 通过
+        </Button>
+        <Button size="sm" variant="secondary" onClick={() => setRejectOpen(true)} disabled={busy}>
+          <X size={13} /> 拒绝
+        </Button>
+      </div>
+      <ConfirmDialog
+        open={rejectOpen}
+        onOpenChange={setRejectOpen}
+        title="拒绝这个注册申请？"
+        description={`${member.name}（${member.email}）的账号会被删除，对方需要重新注册。`}
+        confirmLabel="拒绝并删除"
+        onConfirm={() => void reject()}
+      />
+    </div>
+  )
+}
+
+function PositionsDialog({
+  open,
+  onClose,
+  positions,
+  onChange,
+}: {
+  open: boolean
+  onClose: () => void
+  positions: string[]
+  onChange: (next: string[]) => void
+}) {
+  const [draft, setDraft] = useState('')
+
+  const add = () => {
+    const value = draft.trim().slice(0, 20)
+    if (!value) return
+    if (positions.includes(value)) {
+      setDraft('')
+      return
+    }
+    onChange([...positions, value])
+    setDraft('')
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent size="sm">
+        <DialogHeader
+          title="岗位设置"
+          description="每个公司可以定义自己的岗位名称。成员审批、成员资料和助理配置都会使用这里的岗位。"
+        />
+        <DialogBody className="space-y-3">
+          <div className="flex flex-wrap gap-1.5">
+            {positions.length === 0 && (
+              <p className="text-[11.5px] text-muted">还没有岗位，先添加一个吧。</p>
+            )}
+            {positions.map((position) => (
+              <span
+                key={position}
+                className="inline-flex items-center gap-1 rounded-md border border-line bg-raised py-1 pl-2 pr-1 text-[11.5px] text-ink"
+              >
+                {position}
+                <button
+                  type="button"
+                  onClick={() => onChange(positions.filter((item) => item !== position))}
+                  aria-label={`删除岗位 ${position}`}
+                  className="inline-flex h-4 w-4 items-center justify-center rounded text-faint hover:bg-sunken hover:text-danger"
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <Input
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  add()
+                }
+              }}
+              placeholder="例如：客户成功经理"
+              maxLength={20}
+              aria-label="新岗位名称"
+            />
+            <Button size="sm" variant="secondary" onClick={add}>
+              添加
+            </Button>
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="primary" onClick={onClose}>
+            完成
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -284,7 +517,8 @@ function MemberDetailDialog({
   isSelf: boolean
   onClose: () => void
 }) {
-  const { updateMember, notify } = useStore()
+  const { state, updateMember, notify } = useStore()
+  const positions = state.company.positions ?? []
   const [jobTitle, setJobTitle] = useState(member.jobTitle)
   const [department, setDepartment] = useState(member.department)
   const [role, setRole] = useState<Role>(member.role)
@@ -334,6 +568,12 @@ function MemberDetailDialog({
             </Badge>
           </div>
 
+          {member.status === 'pending' && (
+            <div className="rounded-lg border border-warning/25 bg-warning-soft px-3 py-2.5 text-[11px] leading-5 text-warning">
+              该员工正在等待注册审批，目前无法登录。请在上面「待审批注册」里选择岗位并点击通过。
+            </div>
+          )}
+
           {member.status === 'invited' && (
             <div className="rounded-lg border border-warning/20 bg-warning-soft px-3 py-2.5 text-[11px] leading-5 text-warning">
               该成员尚未首次登录。登录并设置新密码后会自动加入公司大厅，在此之前不能 @ 助理。
@@ -344,11 +584,17 @@ function MemberDetailDialog({
             <Field label="岗位名称" required htmlFor="member-job">
               <Input
                 id="member-job"
+                list="company-positions"
                 value={jobTitle}
                 onChange={(event) => setJobTitle(event.target.value)}
                 maxLength={20}
                 placeholder="例如：销售经理"
               />
+              <datalist id="company-positions">
+                {positions.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
             </Field>
             <Field label="所属部门" htmlFor="member-dept">
               <Select
@@ -441,10 +687,12 @@ function InviteDialog({
   open,
   onClose,
   existing,
+  positions,
 }: {
   open: boolean
   onClose: () => void
   existing: Member[]
+  positions: string[]
 }) {
   const { inviteMember } = useStore()
   const [name, setName] = useState('')
@@ -558,12 +806,17 @@ function InviteDialog({
                 maxLength={20}
               />
             </Field>
-            <Field label="岗位名称" required htmlFor="invite-job">
+            <datalist id="company-positions">
+              {positions.map((item) => (
+                <option key={item} value={item} />
+              ))}
+            </datalist>            <Field label="岗位名称" required htmlFor="invite-job">
               <Input
                 id="invite-job"
+                list="company-positions"
                 value={jobTitle}
                 onChange={(event) => setJobTitle(event.target.value)}
-                placeholder="例如：客户成功经理"
+                placeholder={positions[0] ? `例如：${positions[0]}` : '例如：客户成功经理'}
                 maxLength={20}
               />
             </Field>

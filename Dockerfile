@@ -64,6 +64,22 @@ WORKDIR /app
 COPY --from=web /app/dist ./dist
 COPY server ./server
 
+# Python 依赖：文档正文提取 + Whisper 语音转写。
+# 预先把模型烘焙进镜像，客户 VPS 无外网时也能转写。
+ARG STT_MODEL=small
+ENV STT_MODEL=${STT_MODEL} \
+    STT_MODEL_DIR=/opt/stt-models \
+    STT_LOCAL_ONLY=1 \
+    STT_LANGUAGE=zh \
+    HF_HUB_DISABLE_TELEMETRY=1
+RUN set -eux; \
+    PY=/opt/hermes/.venv/bin/python; \
+    if ! "$PY" -m pip --version >/dev/null 2>&1; then "$PY" -m ensurepip --upgrade; fi; \
+    "$PY" -m pip install --no-cache-dir -r /app/server/requirements.txt; \
+    mkdir -p /opt/stt-models; \
+    "$PY" -c "from faster_whisper import WhisperModel; WhisperModel('${STT_MODEL}', device='cpu', compute_type='int8', download_root='/opt/stt-models')"; \
+    chown -R hermes:hermes /opt/stt-models
+
 # Docker 命名卷第一次创建时会继承这个目录的属主。
 # 入口脚本会把主进程降权到 hermes（UID 10000），所以数据目录必须可写。
 RUN mkdir -p /data && chown -R hermes:hermes /data

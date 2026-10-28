@@ -3,14 +3,16 @@ import {
   AtSign,
   CornerDownLeft,
   FilePlus2,
+  Loader2,
   Quote,
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { Agent, Attachment, Group, Message } from '../../lib/types'
+import { api, describeError } from '../../lib/api'
 import { useStore } from '../../lib/store'
-import { cn, uid } from '../../lib/utils'
+import { cn } from '../../lib/utils'
 import { AgentAvatar } from '../ui/avatar'
 import { formatClock } from '../../lib/format'
 import { formatFileSize, kindFromName } from './AttachmentCard'
@@ -31,6 +33,7 @@ export function Composer({
   const { state, sendMessage, notify } = useStore()
   const [value, setValue] = useState(initialValue)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [uploading, setUploading] = useState(0)
   const [mentionQuery, setMentionQuery] = useState<string | null>(null)
   const [mentionStart, setMentionStart] = useState(-1)
   const [activeIndex, setActiveIndex] = useState(0)
@@ -137,10 +140,11 @@ export function Composer({
     })
   }
 
-  const handleFiles = (files: FileList | null) => {
+  const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return
-    const accepted: Attachment[] = []
-    for (const file of Array.from(files)) {
+    const picked = Array.from(files).slice(0, 5)
+    if (fileRef.current) fileRef.current.value = ''
+    for (const file of picked) {
       if (file.size > 20 * 1024 * 1024) {
         notify(`${file.name} 超过 20 MB`, {
           description: '当前限制单个附件 20 MB。',
@@ -148,24 +152,41 @@ export function Composer({
         })
         continue
       }
-      accepted.push({
-        id: uid('att'),
-        name: file.name,
-        size: formatFileSize(file.size),
-        kind: kindFromName(file.name),
-      })
+      if (attachments.length >= 5) {
+        notify('最多添加 5 个附件', { tone: 'warning' })
+        break
+      }
+      setUploading((count) => count + 1)
+      try {
+        const uploaded = await api.uploadFile(file, file.name, 'chat')
+        setAttachments((prev) =>
+          [
+            ...prev,
+            {
+              id: uploaded.id,
+              name: uploaded.name,
+              size: formatFileSize(uploaded.size),
+              kind: kindFromName(uploaded.name),
+            },
+          ].slice(0, 5),
+        )
+      } catch (error) {
+        notify(`${file.name} 上传失败`, {
+          description: describeError(error),
+          tone: 'danger',
+        })
+      } finally {
+        setUploading((count) => Math.max(0, count - 1))
+      }
     }
-    if (accepted.length > 0) {
-      setAttachments((prev) => [...prev, ...accepted].slice(0, 5))
-      notify(`已添加 ${accepted.length} 个附件`, {
-        description: '当前版本只记录文件名与大小，不会上传文件内容。',
-      })
-    }
-    if (fileRef.current) fileRef.current.value = ''
   }
 
   const handleSend = () => {
     if (disabled) return
+    if (uploading > 0) {
+      notify('附件还在上传', { description: '等上传完成再发送。', tone: 'warning' })
+      return
+    }
     const content = value.trim()
     if (!content) {
       if (attachments.length > 0) {
@@ -252,8 +273,14 @@ export function Composer({
           </div>
         )}
 
-        {attachments.length > 0 && (
+        {(attachments.length > 0 || uploading > 0) && (
           <div className="flex flex-wrap gap-1.5 border-b border-line px-3 py-2">
+            {uploading > 0 && (
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-line bg-raised px-2 py-1 text-[11px] text-muted">
+                <Loader2 size={11} className="animate-spin" />
+                正在上传 {uploading} 个文件…
+              </span>
+            )}
             {attachments.map((attachment) => (
               <span
                 key={attachment.id}
@@ -353,7 +380,7 @@ export function Composer({
             disabled={disabled}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md text-faint transition-colors hover:bg-sunken hover:text-ink disabled:pointer-events-none disabled:opacity-40"
             aria-label="添加附件"
-            title="添加附件（当前版本只记录元数据）"
+            title="添加附件（上传后助理可读取内容）"
           >
             <FilePlus2 size={15} />
           </button>
@@ -402,7 +429,7 @@ export function Composer({
           <button
             type="button"
             onClick={handleSend}
-            disabled={!value.trim() || disabled}
+            disabled={!value.trim() || disabled || uploading > 0}
             className="ml-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent text-white shadow-card transition-colors hover:bg-accent-strong disabled:pointer-events-none disabled:opacity-40"
             aria-label="发送消息"
           >

@@ -3,16 +3,22 @@ import {
   CheckCircle2,
   ChevronRight,
   ClipboardList,
+  FileAudio,
   FileText,
+  Loader2,
   Lock,
-  MicOff,
+  Mic,
   Plus,
+  RefreshCw,
+  Save,
   Search,
   ShieldCheck,
   Trash2,
+  Upload,
   UsersRound,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { api, describeError } from '../../lib/api'
 import { useStore } from '../../lib/store'
 import type { MeetingNote } from '../../lib/types'
 import { formatDay } from '../../lib/format'
@@ -34,7 +40,7 @@ import { Checkbox, Field, Input, Textarea } from '../../components/ui/input'
 
 const SOURCE_LABEL: Record<MeetingNote['source'], string> = {
   paste: '手动粘贴',
-  upload: '上传文本',
+  upload: '录音转写',
   assistant: '助理整理',
 }
 
@@ -46,7 +52,15 @@ function localDateTimeValue(date = new Date()) {
 }
 
 export function WorkspaceMeetingsPage() {
-  const { state, currentUser, createMeeting, toggleMeetingAction, deleteMeeting } = useStore()
+  const {
+    state,
+    currentUser,
+    createMeeting,
+    toggleMeetingAction,
+    deleteMeeting,
+    updateMeeting,
+    resummarizeMeeting,
+  } = useStore()
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
@@ -81,7 +95,7 @@ export function WorkspaceMeetingsPage() {
       <PageHeader
         eyebrow="会议纪要"
         title="开完会，行动项留在公司"
-        description="粘贴会议文字记录，由已配置的大模型整理摘要、决议与行动项。不录音、不自动加入会议，只处理你主动提供的文本。"
+        description="上传会议录音自动转写成文字，再交给已配置的大模型整理摘要、决议与行动项；转写和纪要都可以随时编辑。"
         actions={
           <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
             <Plus size={14} /> 新建纪要
@@ -90,17 +104,17 @@ export function WorkspaceMeetingsPage() {
       />
 
       <div className="mb-5 flex items-start gap-2 rounded-xl border border-line bg-surface px-4 py-3 shadow-card">
-        <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-success-soft text-success">
-          <MicOff size={14} />
+        <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
+          <Mic size={14} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[12px] font-medium text-ink">不依赖录音，也不会自动入会</div>
+          <div className="text-[12px] font-medium text-ink">上传录音或粘贴记录，二者都行</div>
           <p className="mt-0.5 text-[11px] leading-5 text-muted">
-            TeamOS 只处理你手动粘贴或上传的文字，摘要与行动项在本地用规则提取，不调用外部模型。含敏感信息的纪要可以标记为保密，仅参与人可见。
+            录音在本机服务端用 Whisper 转写，不发送给第三方；转写完成后可以逐字校对，再让模型整理成纪要。含敏感信息的纪要可以标记为保密，仅参与人可见。
           </p>
         </div>
         <Badge tone="outline" className="hidden shrink-0 sm:inline-flex">
-          <ShieldCheck size={11} /> 隐私优先
+          <ShieldCheck size={11} /> 数据留在自己服务器
         </Badge>
       </div>
 
@@ -141,7 +155,7 @@ export function WorkspaceMeetingsPage() {
         <EmptyState
           icon={CalendarClock}
           title="还没有会议纪要"
-          description="新建一条纪要，粘贴会议文字记录，就能得到摘要、决议和带负责人的行动项。"
+          description="新建一条纪要，上传会议录音或粘贴文字记录，就能得到摘要、决议和带负责人的行动项。"
           action={
             <Button size="sm" variant="primary" onClick={() => setCreateOpen(true)}>
               <Plus size={13} /> 新建纪要
@@ -219,7 +233,7 @@ export function WorkspaceMeetingsPage() {
                       </li>
                     ))}
                     {meeting.summary.length === 0 && (
-                      <li className="text-[11.5px] text-faint">文字记录中没有可提取的摘要。</li>
+                      <li className="text-[11.5px] text-faint">还没有生成摘要。</li>
                     )}
                   </ul>
                   <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
@@ -231,6 +245,11 @@ export function WorkspaceMeetingsPage() {
                     </Badge>
                     {meeting.decisions.length > 0 && (
                       <Badge tone="neutral">{meeting.decisions.length} 条决议</Badge>
+                    )}
+                    {meeting.audioFileId && (
+                      <Badge tone="outline">
+                        <FileAudio size={10} /> 有录音
+                      </Badge>
                     )}
                     <ChevronRight
                       size={14}
@@ -249,6 +268,8 @@ export function WorkspaceMeetingsPage() {
         onClose={() => setSelectedId(null)}
         onToggleAction={toggleMeetingAction}
         onDelete={(id) => setConfirmDeleteId(id)}
+        onUpdate={updateMeeting}
+        onResummarize={resummarizeMeeting}
         canDelete={Boolean(
           currentUser &&
             (currentUser.role === 'admin' || currentUser.id === selected?.createdBy),
@@ -283,15 +304,29 @@ function MeetingDetailDialog({
   onClose,
   onToggleAction,
   onDelete,
+  onUpdate,
+  onResummarize,
   canDelete,
 }: {
   meeting: MeetingNote | null
   onClose: () => void
   onToggleAction: (meetingId: string, actionId: string) => void
   onDelete: (id: string) => void
+  onUpdate: ReturnType<typeof useStore>['updateMeeting']
+  onResummarize: ReturnType<typeof useStore>['resummarizeMeeting']
   canDelete: boolean
 }) {
-  const { state } = useStore()
+  const { state, notify } = useStore()
+  const [transcript, setTranscript] = useState('')
+  const [dirty, setDirty] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const meetingId = meeting?.id
+
+  useEffect(() => {
+    setTranscript(meeting?.transcript ?? '')
+    setDirty(false)
+  }, [meetingId, meeting?.transcript])
+
   if (!meeting) return null
   const participants = meeting.participantIds
     .map((id) => state.members.find((member) => member.id === id))
@@ -299,9 +334,29 @@ function MeetingDetailDialog({
   const creator = state.members.find((member) => member.id === meeting.createdBy)
   const done = meeting.actions.filter((action) => action.done).length
 
+  const saveTranscript = () => {
+    onUpdate(meeting.id, { transcript })
+    setDirty(false)
+    notify('转写已保存', { tone: 'success' })
+  }
+
+  const resummarize = async () => {
+    setBusy(true)
+    try {
+      const result = await onResummarize(meeting.id, transcript)
+      if (!result.ok) {
+        notify('重新总结失败', { description: result.error, tone: 'danger' })
+        return
+      }
+      setDirty(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <Dialog open={Boolean(meeting)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent size="lg">
+      <DialogContent size="xl">
         <DialogHeader
           title={meeting.title}
           description={`${formatDay(meeting.meetingAt)} · ${meeting.durationMin} 分钟 · ${SOURCE_LABEL[meeting.source]}${creator ? ` · 由 ${creator.name} 创建` : ''}`}
@@ -320,6 +375,23 @@ function MeetingDetailDialog({
             </Badge>
           </div>
 
+          {meeting.audioFileId && (
+            <section className="rounded-lg border border-line bg-raised px-3 py-2.5">
+              <div className="mb-2 flex items-center gap-1.5 text-[11.5px] text-ink-soft">
+                <FileAudio size={13} className="text-muted" />
+                <span className="min-w-0 flex-1 truncate">{meeting.audioName || '会议录音'}</span>
+              </div>
+              <audio
+                controls
+                preload="none"
+                src={api.fileUrl(meeting.audioFileId, true)}
+                className="w-full"
+              >
+                你的浏览器不支持音频播放。
+              </audio>
+            </section>
+          )}
+
           <section>
             <h3 className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold text-ink">
               <FileText size={13} className="text-muted" /> 摘要
@@ -332,7 +404,7 @@ function MeetingDetailDialog({
                 </li>
               ))}
               {meeting.summary.length === 0 && (
-                <li className="text-[12px] text-faint">文字记录中没有可提取的摘要。</li>
+                <li className="text-[12px] text-faint">还没有生成摘要，可以点下方「重新总结」。</li>
               )}
             </ul>
           </section>
@@ -407,9 +479,36 @@ function MeetingDetailDialog({
               </div>
             ) : (
               <p className="rounded-lg bg-raised px-3 py-2.5 text-[11.5px] leading-5 text-faint">
-                这段文字记录里没有出现「负责 / 跟进 / 待办 / 截止」等行动项线索，所以没有生成行动项。
+                还没有识别到行动项，可以检查转写内容后重新总结。
               </p>
             )}
+          </section>
+
+          <section>
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="flex items-center gap-1.5 text-[12px] font-semibold text-ink">
+                <FileText size={13} className="text-muted" /> 转写文字
+              </h3>
+              <div className="flex items-center gap-1.5">
+                {dirty && <span className="text-[10px] text-warning">未保存</span>}
+                <Button size="sm" variant="ghost" onClick={saveTranscript} disabled={!dirty}>
+                  <Save size={12} /> 保存
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => void resummarize()} disabled={busy}>
+                  {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                  重新总结
+                </Button>
+              </div>
+            </div>
+            <Textarea
+              value={transcript}
+              onChange={(event) => {
+                setTranscript(event.target.value)
+                setDirty(true)
+              }}
+              placeholder="转写文字会出现在这里，可以直接修改错别字、补充发言人或删掉无关内容。"
+              className="min-h-[220px] font-mono text-[12px] leading-5"
+            />
           </section>
 
           <section>
@@ -431,10 +530,6 @@ function MeetingDetailDialog({
               )}
             </div>
           </section>
-
-          <p className="rounded-lg bg-raised px-3 py-2 text-[10.5px] leading-4 text-faint">
-            摘要、决议与行动项由本地规则从你提供的文字中提取，没有调用真实模型，也不会凭空补全没说过的话。
-          </p>
         </DialogBody>
         <DialogFooter className="justify-between">
           <div>
@@ -453,13 +548,6 @@ function MeetingDetailDialog({
   )
 }
 
-const SAMPLE_TRANSCRIPT = `[10:00] 林知远：今天确认权限中心的角色模型和验收标准。
-[10:05] 陈曦：决定采用五类角色，把审计只读单独拆出来。
-[10:12] 苏晚：部门隔离需要补验收标准，我负责下周二前给出权限矩阵。
-[10:20] 陈曦：我负责周五前补齐部门隔离的测试数据。
-[10:28] 林知远：确认审计事件保留 180 天，等法务确认后冻结。
-[10:33] 林知远：下周一把结论同步到公司大厅，我来跟进。`
-
 function CreateMeetingDialog({
   open,
   onOpenChange,
@@ -471,7 +559,7 @@ function CreateMeetingDialog({
   onCreate: ReturnType<typeof useStore>['createMeeting']
   onCreated: () => void
 }) {
-  const { state, currentUser } = useStore()
+  const { state, currentUser, notify } = useStore()
   const activeMembers = state.members.filter((member) => member.status === 'active')
   const [title, setTitle] = useState('')
   const [meetingAt, setMeetingAt] = useState(localDateTimeValue())
@@ -481,8 +569,13 @@ function CreateMeetingDialog({
   )
   const [confidential, setConfidential] = useState(false)
   const [transcript, setTranscript] = useState('')
+  const [audioFileId, setAudioFileId] = useState<string | undefined>()
+  const [audioName, setAudioName] = useState<string | undefined>()
+  const [uploading, setUploading] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const audioRef = useRef<HTMLInputElement>(null)
 
   const reset = () => {
     setTitle('')
@@ -491,14 +584,53 @@ function CreateMeetingDialog({
     setParticipantIds(currentUser ? [currentUser.id] : [])
     setConfidential(false)
     setTranscript('')
+    setAudioFileId(undefined)
+    setAudioName(undefined)
     setError('')
     setSubmitting(false)
+    if (audioRef.current) audioRef.current.value = ''
   }
 
   const toggleParticipant = (id: string) => {
     setParticipantIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
     )
+  }
+
+  const handleAudio = async (file: File | null) => {
+    if (!file) return
+    if (file.size > 200 * 1024 * 1024) {
+      setError('录音超过 200 MB，请压缩或分段上传。')
+      return
+    }
+    setError('')
+    setUploading(true)
+    try {
+      const uploaded = await api.uploadFile(file, file.name, 'audio')
+      setAudioFileId(uploaded.id)
+      setAudioName(uploaded.name)
+      setUploading(false)
+      setTranscribing(true)
+      try {
+        const result = await api.transcribeFile(uploaded.id)
+        setTranscript(result.text)
+        if (result.durationSec) {
+          setDuration(String(Math.max(1, Math.round(result.durationSec / 60))))
+        }
+        if (!title.trim()) setTitle(file.name.replace(/\.[^.]+$/, ''))
+        notify('转写完成', {
+          description: `识别出 ${result.text.length} 个字，请校对后再生成纪要。`,
+          tone: 'success',
+        })
+      } catch (reason) {
+        setError(`转写失败：${describeError(reason)}。你仍然可以手动粘贴文字记录。`)
+      }
+    } catch (reason) {
+      setError(`录音上传失败：${describeError(reason)}`)
+    } finally {
+      setUploading(false)
+      setTranscribing(false)
+    }
   }
 
   const submit = async () => {
@@ -513,6 +645,9 @@ function CreateMeetingDialog({
         participantIds,
         transcript,
         confidential,
+        audioFileId,
+        audioName,
+        source: audioFileId ? 'upload' : 'paste',
       })
       if (!result.ok) {
         setError(result.error ?? '请检查填写内容。')
@@ -533,10 +668,10 @@ function CreateMeetingDialog({
         onOpenChange(next)
       }}
     >
-      <DialogContent size="lg">
+      <DialogContent size="xl">
         <DialogHeader
           title="新建会议纪要"
-          description="粘贴会议文字记录，由已配置的大模型整理摘要、决议与行动项。不会录音，也不会自动加入会议。"
+          description="上传录音自动转写，或直接粘贴文字记录；再由已配置的大模型整理摘要、决议与行动项。"
           icon={CalendarClock}
         />
         <DialogBody className="space-y-4">
@@ -562,7 +697,7 @@ function CreateMeetingDialog({
               <Input
                 id="meeting-duration"
                 type="number"
-                min={5}
+                min={1}
                 max={480}
                 value={duration}
                 onChange={(event) => setDuration(event.target.value)}
@@ -597,6 +732,53 @@ function CreateMeetingDialog({
             </div>
           </Field>
 
+          <Field
+            label="会议录音"
+            hint="mp3 / wav / m4a / ogg，单文件 200 MB 内"
+          >
+            <label
+              className={cn(
+                'flex cursor-pointer items-center gap-2.5 rounded-lg border border-dashed px-3 py-2.5 text-[12px] transition-colors',
+                audioFileId
+                  ? 'border-accent-line bg-accent-soft/40'
+                  : 'border-line-strong bg-raised hover:border-accent',
+              )}
+            >
+              {uploading || transcribing ? (
+                <Loader2 size={14} className="animate-spin text-accent" />
+              ) : audioFileId ? (
+                <FileAudio size={14} className="text-accent" />
+              ) : (
+                <Upload size={14} className="text-muted" />
+              )}
+              <span className="min-w-0 flex-1 truncate text-ink">
+                {audioName ??
+                  (uploading ? '正在上传录音…' : transcribing ? '正在转写，请稍候…' : '点击选择录音文件')}
+              </span>
+              {audioFileId && (
+                <span className="shrink-0 text-[10.5px] text-faint">已上传</span>
+              )}
+              <input
+                ref={audioRef}
+                type="file"
+                className="hidden"
+                accept=".mp3,.wav,.m4a,.ogg,.webm,.flac,.aac,.mp4"
+                disabled={uploading || transcribing}
+                onChange={(event) => void handleAudio(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            {audioFileId && (
+              <div className="mt-2">
+                <audio
+                  controls
+                  preload="none"
+                  src={api.fileUrl(audioFileId, true)}
+                  className="w-full"
+                />
+              </div>
+            )}
+          </Field>
+
           <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-line bg-raised px-3 py-2.5">
             <Checkbox
               checked={confidential}
@@ -616,21 +798,21 @@ function CreateMeetingDialog({
           <Field
             label="会议文字记录"
             required
-            hint={`${transcript.trim() ? transcript.trim().split(/\r?\n/).filter(Boolean).length : 0} 行`}
+            hint={`${transcript.trim() ? transcript.trim().split(/\r?\n/).filter(Boolean).length : 0} 行 · 可编辑`}
             htmlFor="meeting-transcript"
           >
             <Textarea
               id="meeting-transcript"
               value={transcript}
               onChange={(event) => setTranscript(event.target.value)}
-              placeholder={`粘贴会议记录，每行一句，例如：\n${SAMPLE_TRANSCRIPT}`}
-              className="min-h-[180px] font-mono text-[12px] leading-5"
+              placeholder="上传录音后会自动转写到这里；也可以直接粘贴会议记录，每行一句。"
+              className="min-h-[200px] font-mono text-[12px] leading-5"
             />
           </Field>
 
           <div className="flex items-start gap-2 rounded-lg bg-raised px-3 py-2 text-[10.5px] leading-4 text-faint">
             <ShieldCheck size={12} className="mt-0.5 shrink-0" />
-            只保存整理后的摘要与行动项，不上传也不保存原始录音；数据随会议记录存放在公司自己的服务端。
+            录音与转写文字保存在公司自己的服务器；摘要、决议与行动项由已配置的大模型生成，句句来自转写内容。
           </div>
 
           {error && (
@@ -652,9 +834,16 @@ function CreateMeetingDialog({
           <Button
             variant="primary"
             onClick={() => void submit()}
-            disabled={!title.trim() || !transcript.trim() || submitting}
+            disabled={
+              !title.trim() ||
+              !transcript.trim() ||
+              submitting ||
+              uploading ||
+              transcribing
+            }
           >
-            <ClipboardList size={13} /> {submitting ? '模型正在整理…' : '生成纪要'}
+            {submitting ? <Loader2 size={13} className="animate-spin" /> : <ClipboardList size={13} />}
+            {submitting ? '模型正在整理…' : '生成纪要'}
           </Button>
         </DialogFooter>
       </DialogContent>

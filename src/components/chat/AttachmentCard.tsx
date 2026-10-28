@@ -8,6 +8,7 @@ import {
   Presentation,
 } from 'lucide-react'
 import type { Attachment, AttachmentKind } from '../../lib/types'
+import { api, describeError } from '../../lib/api'
 import { useStore } from '../../lib/store'
 import { cn } from '../../lib/utils'
 import { IconTip } from '../ui/tooltip'
@@ -47,11 +48,19 @@ export function AttachmentCard({
   const style = kindStyles[attachment.kind] ?? kindStyles.other
   const Icon = style.icon
 
-  const handleDownload = () => {
-    notify('附件内容未上传', {
-      description: '当前版本只记录文件名和大小，文件本身仍在你本机。',
-      tone: 'warning',
-    })
+  const handleDownload = async () => {
+    if (!/^f_[A-Za-z0-9]+$/.test(attachment.id)) {
+      notify('这个附件没有上传到服务器', {
+        description: '早期消息只保存了文件名；重新上传后即可下载。',
+        tone: 'warning',
+      })
+      return
+    }
+    try {
+      await api.downloadFile(attachment.id, attachment.name)
+    } catch (error) {
+      notify('下载失败', { description: describeError(error), tone: 'danger' })
+    }
   }
 
   if (compact) {
@@ -64,7 +73,7 @@ export function AttachmentCard({
           <div className="truncate text-[11.5px] font-medium text-ink">{attachment.name}</div>
           <div className="text-[10px] text-faint">{attachment.size}</div>
         </div>
-        <IconTip label="附件未上传">
+        <IconTip label="下载附件">
           <button
             type="button"
             onClick={handleDownload}
@@ -85,9 +94,9 @@ export function AttachmentCard({
       </span>
       <div className="min-w-0 flex-1">
         <div className="truncate text-[12px] font-medium text-ink">{attachment.name}</div>
-        <div className="text-[10.5px] text-faint">{attachment.size} · 工作区文件</div>
+        <div className="text-[10.5px] text-faint">{attachment.size} · 已上传</div>
       </div>
-      <IconTip label="附件未上传">
+      <IconTip label="下载附件">
         <button
           type="button"
           onClick={handleDownload}

@@ -52,7 +52,9 @@ function cosine(left, right) {
 }
 
 function splitChunks(doc) {
-  const text = `${doc.title}\n${(doc.tags ?? []).join(' ')}\n${doc.summary}`
+  // 归档文档的正文才是真正的知识来源，标题/摘要只作为补充。
+  const body = String(doc.content || '').slice(0, 60000)
+  const text = `${doc.title}\n${(doc.tags ?? []).join(' ')}\n${doc.summary}\n${body}`
   const sentences = text
     .split(/(?<=[。！？!?；;\n])/)
     .map((part) => part.trim())
@@ -68,7 +70,7 @@ function splitChunks(doc) {
   }
   if (current.trim()) chunks.push(current)
   if (chunks.length === 0 && text.trim()) chunks.push(text.slice(0, MAX_CHUNK_CHARS))
-  return chunks.slice(0, 12).map((chunk, index) => ({
+  return chunks.slice(0, 400).map((chunk, index) => ({
     id: `${doc.id}#${index}`,
     text: chunk,
     doc,

@@ -67,7 +67,7 @@ export function AdminConnectorsPage() {
       <PageHeader
         eyebrow="管理后台 · 渠道接入"
         title="把外部消息带进公司大厅"
-        description="企业微信、飞书、钉钉、Slack 与内部系统通过回调把消息转交 TeamOS。所有接入都必须开启签名校验，密钥只写不读。"
+        description="企业微信、飞书、钉钉、Slack 与内部系统通过回调把消息转交 TeamOS；配置群机器人地址后，测试会真实投递一条消息。所有接入都必须开启签名校验，密钥只写不读。"
       />
 
       <div className="mb-5 grid grid-cols-2 gap-2.5 xl:grid-cols-4">
@@ -135,7 +135,7 @@ export function AdminConnectorsPage() {
 
               <dl className="mt-3 space-y-1.5 rounded-lg bg-raised px-3 py-2.5 text-[11px]">
                 <div className="flex items-center justify-between gap-3">
-                  <dt className="shrink-0 text-faint">回调地址</dt>
+                  <dt className="shrink-0 text-faint">投递地址</dt>
                   <dd className="min-w-0 truncate font-mono text-[10.5px] text-ink-soft">
                     {connector.endpointHint || '未配置'}
                   </dd>
@@ -152,6 +152,16 @@ export function AdminConnectorsPage() {
                     {connector.lastEventAt ? formatRelative(connector.lastEventAt) : '尚无事件'}
                   </dd>
                 </div>
+                {connector.lastTest && (
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="shrink-0 text-faint">连通性测试</dt>
+                    <dd className={`min-w-0 truncate ${connector.lastTest.ok ? 'text-success' : 'text-warning'}`}>
+                      {connector.lastTest.ok
+                        ? `HTTP ${connector.lastTest.status} · ${connector.lastTest.latencyMs}ms · ${formatRelative(connector.lastTest.at)}`
+                        : `${connector.lastTest.message} · ${formatRelative(connector.lastTest.at)}`}
+                    </dd>
+                  </div>
+                )}
               </dl>
 
               <div className="mt-2.5 flex flex-wrap gap-1">
@@ -181,11 +191,11 @@ export function AdminConnectorsPage() {
                     disabled={!isConnected || !connector.signature}
                     title={
                       !isConnected
-                        ? '先启用渠道后才能发送测试事件'
-                        : '发送一条经过签名校验的测试事件'
+                        ? '先启用渠道后才能发送测试消息'
+                        : '向配置的地址发送一条真实测试消息'
                     }
                   >
-                    <Zap size={12} /> 发送测试事件
+                    <Zap size={12} /> 发送测试消息
                   </Button>
                 </div>
               </div>
@@ -330,7 +340,7 @@ function ConnectorDialog({
           </label>
 
           <Field
-            label="回调地址"
+            label="投递地址"
             hint={connector.endpointHint ? '已配置，留空保持不变' : '必填'}
             htmlFor="connector-endpoint"
           >
@@ -338,7 +348,7 @@ function ConnectorDialog({
               id="connector-endpoint"
               value={endpoint}
               onChange={(event) => setEndpoint(event.target.value)}
-              placeholder={connector.endpointHint || 'https://…/api/hooks/teamos'}
+              placeholder={connector.endpointHint || 'https://…/bot/v2/hook/…'}
               autoComplete="off"
               spellCheck={false}
               className="font-mono text-[12px]"
