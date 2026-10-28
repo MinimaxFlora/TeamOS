@@ -47,6 +47,20 @@ make build          # teamos:local
 
 ## 3. 部署到 VPS
 
+### 方式一：在服务器上一条命令（无需本地 SSH 密钥）
+
+以 root 登录服务器后执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MinimaxFlora/TeamOS/main/scripts/install.sh | sh
+```
+
+脚本会依次执行 `bootstrap-vps.sh`（Docker + 2G swap）、`init-env.sh`（生成 `.env`
+与一次性主密钥）和 `deploy.sh`（拉取 `ghcr.io/minimaxflora/teamos:latest`、启动并等待健康检查）。
+重复执行等同于更新到最新代码并重建容器，`/opt/teamos/.env` 与数据卷都会保留。
+
+### 方式二：本地用 make 推送（需要 SSH 私钥）
+
 前提：本地有 SSH 私钥，服务器能免密登录。
 
 ```bash
