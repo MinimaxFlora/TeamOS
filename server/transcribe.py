@@ -11,6 +11,11 @@ def fail(message):
 
 
 def main():
+    try:
+        # Windows 控制台默认可能是 GBK，统一用 UTF-8 输出，服务端按 UTF-8 解析。
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     if len(sys.argv) < 2:
         return fail("缺少音频文件")
     path = sys.argv[1]
@@ -33,9 +38,16 @@ def main():
             download_root=download_root,
             local_files_only=os.environ.get("STT_LOCAL_ONLY") == "1",
         )
+        language = os.environ.get("STT_LANGUAGE") or None
+        # Whisper 对中文默认可能输出繁体；用简体提示词把结果拉回简体，
+        # 会议纪要里混入繁体对客户很不专业。
+        initial_prompt = None
+        if language and language.lower().startswith("zh"):
+            initial_prompt = "以下是普通话会议内容的简体中文转写，请使用简体中文。"
         segments, info = model.transcribe(
             path,
-            language=os.environ.get("STT_LANGUAGE") or None,
+            language=language,
+            initial_prompt=initial_prompt,
             vad_filter=True,
             beam_size=1,
             condition_on_previous_text=False,

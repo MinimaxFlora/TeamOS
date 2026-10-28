@@ -22,6 +22,7 @@ import {
   saveConnectorConfig,
   saveState,
   setSetting,
+  updateFileRow,
   updateState,
   updateUser,
 } from './db.mjs'

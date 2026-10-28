@@ -56,6 +56,11 @@ def pptx_text(path):
 
 
 def main():
+    try:
+        # Windows 控制台默认可能是 GBK，统一用 UTF-8 输出，服务端按 UTF-8 解析。
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     if len(sys.argv) < 2:
         print("")
         return 0
