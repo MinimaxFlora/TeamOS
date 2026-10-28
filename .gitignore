@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+playwright-report
+test-results
+
+# 运行数据与密钥
+.env
+.env.*
+!.env.example
+.teamos-data
+.test-data
+backups
+*.log
+*.tsbuildinfo

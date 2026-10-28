@@ -1,0 +1,66 @@
+# TeamOS 一体化部署：面板 + Node API + Hermes Agent 全在这一个容器里。
+# 不要加 `init: true`，否则会绕过基础镜像的 s6 初始化。
+name: teamos
+
+services:
+  teamos:
+    image: ${TEAMOS_IMAGE:-ghcr.io/minimaxflora/teamos:latest}
+    build:
+      context: .
+      args:
+        HERMES_IMAGE: ${HERMES_IMAGE:-nousresearch/hermes-agent:v0.22.5}
+        NODE_VERSION: ${NODE_VERSION:-24.22.1}
+    container_name: teamos
+    restart: unless-stopped
+    ports:
+      # 默认对公网开放 8080。正式使用前请改成 127.0.0.1 并放到 Caddy/Nginx 后面。
+      - "${BIND_ADDR:-0.0.0.0}:${TEAMOS_PORT:-8080}:8080"
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      DATA_DIR: /data
+      PUBLIC_DIR: /app/dist
+      TEAMOS_SECRET_KEY: ${TEAMOS_SECRET_KEY:?请在 .env 中设置 TEAMOS_SECRET_KEY，先执行 make env}
+      SESSION_DAYS: "${SESSION_DAYS:-14}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      TRUST_PROXY: "${TRUST_PROXY:-false}"
+      HERMES_AUTO_START: "true"
+      HERMES_HOME: /opt/data
+      HERMES_BIN: /opt/hermes/.venv/bin/hermes
+      HERMES_BASE_URL: http://127.0.0.1:8642
+      API_SERVER_HOST: 127.0.0.1
+      API_SERVER_PORT: "8642"
+      HERMES_ALLOW_ROOT_GATEWAY: "1"
+      HERMES_GATEWAY_NO_SUPERVISE: "1"
+      MODEL_MAX_TOKENS: "${MODEL_MAX_TOKENS:-4096}"
+      MEETING_MAX_TOKENS: "${MEETING_MAX_TOKENS:-1800}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - teamos-data:/data
+      - hermes-data:/opt/data
+    # Chromium / Playwright 默认 64MB 共享内存容易崩，给足一些。
+    shm_size: "256mb"
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # 2GB 机器建议先加 swap（make vps-bootstrap 会自动加 2G），这里不设硬内存上限，
+    # 避免 Hermes 跑浏览器任务时被 OOM 直接杀掉。
+
+volumes:
+  teamos-data:
+    name: teamos-data
+  hermes-data:
+    name: hermes-data

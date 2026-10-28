@@ -1,0 +1,39 @@
+# 可选：域名 + 自动 HTTPS。需先用 DNS 把域名 A 记录指向服务器。
+# 在 .env 中设置：
+#   BIND_ADDR=127.0.0.1
+#   COOKIE_SECURE=true
+#   TRUST_PROXY=true
+#   DOMAIN=team.example.com
+# 然后：
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.caddy.yml up -d
+name: teamos
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: teamos-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?请先在 .env 设置 DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      teamos:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-data:
+    name: teamos-caddy-data
+  caddy-config:
+    name: teamos-caddy-config
