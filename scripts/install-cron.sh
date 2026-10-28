@@ -8,11 +8,12 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 DIR=${1:-/opt/teamos}
-test -x "$DIR/scripts/backup.sh" || chmod +x "$DIR/scripts/backup.sh" 2>/dev/null || true
 if [ ! -f "$DIR/scripts/backup.sh" ]; then
   echo "找不到 $DIR/scripts/backup.sh" >&2
   exit 1
 fi
+# cron 的重定向在 backup.sh 建目录之前执行，这里先建好。
+mkdir -p "$DIR/backups"
 
 cat > /etc/cron.d/teamos-backup <<EOF
 # TeamOS daily backup. Output goes to $DIR/backups/backup.log
