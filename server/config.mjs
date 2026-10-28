@@ -59,9 +59,28 @@ function readOrCreateMasterKey() {
 
 export const masterKey = readOrCreateMasterKey()
 
+function hermesHomeApiKey() {
+  // Hermes loads $HERMES_HOME/.env with override=True, so the gateway running
+  // inside the image may be using the key written there by stage2. TeamOS must
+  // send that same key when the gateway was started outside this process.
+  const envPath = path.join(config.hermes.home, '.env')
+  try {
+    const content = fs.readFileSync(envPath, 'utf8')
+    for (const line of content.split(/\r?\n/)) {
+      const match = /^API_SERVER_KEY=(.*)$/.exec(line.trim())
+      if (match && match[1].trim()) return match[1].trim()
+    }
+  } catch {
+    // No Hermes env file: fall back to a TeamOS-generated key.
+  }
+  return null
+}
+
 export function hermesApiKey() {
   const fromEnv = process.env.API_SERVER_KEY?.trim()
   if (fromEnv) return fromEnv
+  const fromHome = hermesHomeApiKey()
+  if (fromHome) return fromHome
   const keyPath = path.join(config.dataDir, 'hermes-api.key')
   if (fs.existsSync(keyPath)) return fs.readFileSync(keyPath, 'utf8').trim()
   const key = crypto.randomBytes(32).toString('hex')

@@ -62,12 +62,12 @@ export function saveModelConfig(input) {
 }
 
 const PROVIDERS = {
-  openai: { env: 'OPENAI_API_KEY', baseEnv: 'OPENAI_BASE_URL', base: 'https://api.openai.com/v1', hermes: 'openai' },
-  anthropic: { env: 'ANTHROPIC_API_KEY', baseEnv: 'ANTHROPIC_BASE_URL', base: '', hermes: 'anthropic' },
-  openrouter: { env: 'OPENROUTER_API_KEY', baseEnv: 'OPENROUTER_BASE_URL', base: 'https://openrouter.ai/api/v1', hermes: 'openrouter' },
-  deepseek: { env: 'DEEPSEEK_API_KEY', baseEnv: 'DEEPSEEK_BASE_URL', base: 'https://api.deepseek.com/v1', hermes: 'deepseek' },
-  google: { env: 'GEMINI_API_KEY', baseEnv: 'GEMINI_BASE_URL', base: 'https://generativelanguage.googleapis.com/v1beta/openai', hermes: 'gemini' },
-  custom: { env: 'OPENAI_API_KEY', baseEnv: 'OPENAI_BASE_URL', base: '', hermes: 'openai' },
+  openai: { env: 'OPENAI_API_KEY', baseEnv: 'OPENAI_BASE_URL', base: 'https://api.openai.com/v1', hermes: 'openai', provider: 'openai', apiMode: 'chat_completions' },
+  anthropic: { env: 'ANTHROPIC_API_KEY', baseEnv: 'ANTHROPIC_BASE_URL', base: '', hermes: 'anthropic', provider: 'anthropic', apiMode: 'anthropic_messages' },
+  openrouter: { env: 'OPENROUTER_API_KEY', baseEnv: 'OPENROUTER_BASE_URL', base: 'https://openrouter.ai/api/v1', hermes: 'openrouter', provider: 'openrouter', apiMode: 'chat_completions' },
+  deepseek: { env: 'DEEPSEEK_API_KEY', baseEnv: 'DEEPSEEK_BASE_URL', base: 'https://api.deepseek.com/v1', hermes: 'deepseek', provider: 'deepseek', apiMode: 'chat_completions' },
+  google: { env: 'GEMINI_API_KEY', baseEnv: 'GEMINI_BASE_URL', base: 'https://generativelanguage.googleapis.com/v1beta/openai', hermes: 'gemini', provider: 'gemini', apiMode: 'chat_completions' },
+  custom: { env: 'OPENAI_API_KEY', baseEnv: 'OPENAI_BASE_URL', base: '', hermes: 'openai', provider: 'openai', apiMode: 'chat_completions' },
 }
 
 function providerInfo(provider) {
@@ -108,10 +108,20 @@ function updateHermesFiles(model) {
     )
   }
 
+  // `hermes config set model.provider` clears base_url/api_mode that belonged to
+  // the previous provider, so set the provider first and the endpoint after it.
   const target = `${info.hermes}/${model.model}`
   try {
-    const result = execFileSyncSafe(config.hermes.bin, ['config', 'set', 'model', target], hermesEnv())
-    if (result) logLine(`[model] ${result}`)
+    const steps = [
+      ['model.provider', info.provider],
+      ...(model.baseUrl ? [['model.base_url', model.baseUrl]] : []),
+      ['model.api_mode', info.apiMode],
+      ['model.default', target],
+    ]
+    for (const [key, value] of steps) {
+      const result = execFileSyncSafe(config.hermes.bin, ['config', 'set', key, value], hermesEnv())
+      if (result) logLine(`[model] ${String(result).trim()}`)
+    }
   } catch (error) {
     logLine(`[model] failed to set default model: ${error.message}`)
   }
@@ -165,6 +175,55 @@ export async function hermesHealth(timeoutMs = 1500) {
   }
 }
 
+function supervisedGatewayPids() {
+  // The Hermes image starts the gateway under s6 before TeamOS boots. In that
+  // setup `hermes gateway run` refuses to start a second gateway, so a config
+  // change has to restart the supervised process instead of spawning a child.
+  const pids = []
+  let entries = []
+  try {
+    entries = fs.readdirSync('/proc')
+  } catch {
+    return pids
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    const pid = Number(entry)
+    if (pid === process.pid) continue
+    try {
+      const cmd = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8').replace(/\0/g, ' ').trim()
+      if (cmd.includes('/hermes') && cmd.includes('gateway') && cmd.includes(' run')) pids.push(pid)
+    } catch {
+      // Process vanished while scanning.
+    }
+  }
+  return pids
+}
+
+function signalSupervisedGatewayRestart() {
+  const pids = supervisedGatewayPids()
+  if (!pids.length) return false
+  let signalled = false
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGTERM')
+      signalled = true
+    } catch {
+      // Already gone; s6 will bring the service back if it is supervised.
+    }
+  }
+  return signalled
+}
+
+async function waitForGateway(deadlineMs) {
+  const deadline = Date.now() + deadlineMs
+  while (Date.now() < deadline) {
+    if (await hermesHealth(900)) return true
+    await new Promise((resolve) => setTimeout(resolve, 700))
+  }
+  return false
+}
+
 export async function startGateway() {
   if (!config.hermes.autoStart) {
     gatewayState = { ...gatewayState, status: 'disabled', backend: null }
@@ -173,6 +232,12 @@ export async function startGateway() {
   if (starting) return starting
   starting = (async () => {
     if (await hermesHealth()) {
+      gatewayState = { ...gatewayState, status: 'ready', startedAt: new Date().toISOString(), lastError: null }
+      return true
+    }
+    // The image's s6 service may still be bringing its gateway up; don't compete
+    // with it by spawning a second one.
+    if (supervisedGatewayPids().length && (await waitForGateway(15000))) {
       gatewayState = { ...gatewayState, status: 'ready', startedAt: new Date().toISOString(), lastError: null }
       return true
     }
@@ -234,12 +299,31 @@ export async function startGateway() {
 }
 
 export async function restartGateway() {
+  const model = modelConfig()
+  if (model.apiKey) {
+    try {
+      updateHermesFiles(model)
+    } catch (error) {
+      logLine(`[gateway] model config warning: ${error.message}`)
+    }
+  }
   if (gateway) {
     const child = gateway
     gateway = null
     child.kill('SIGTERM')
     await new Promise((resolve) => setTimeout(resolve, 1200))
     if (!child.killed) child.kill('SIGKILL')
+  }
+  if (signalSupervisedGatewayRestart()) {
+    gatewayState = { ...gatewayState, status: 'starting', lastError: null, pid: null }
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    if (await waitForGateway(60000)) {
+      gatewayState = { ...gatewayState, status: 'ready', startedAt: new Date().toISOString(), lastError: null }
+      return true
+    }
+    logLine('[gateway] supervised gateway did not return after restart')
+    gatewayState = { ...gatewayState, status: 'failed', lastError: 'Hermes gateway did not restart' }
+    return false
   }
   gatewayState = { ...gatewayState, status: 'stopped' }
   return startGateway()
