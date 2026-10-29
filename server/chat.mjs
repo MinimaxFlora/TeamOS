@@ -1,6 +1,7 @@
-import { config } from './config.mjs'
+﻿import { config } from './config.mjs'
 import { completeText, openChatStream } from './hermes.mjs'
 import { formatKnowledgeContext, retrieveKnowledge, toSourceRefs } from './rag.mjs'
+import { skillInstructions } from './skills.mjs'
 
 const TOOL_LABELS = {
   'file.read': '读取工作区文件',
@@ -11,10 +12,19 @@ const TOOL_LABELS = {
   'shell.run': '执行命令（高风险）',
 }
 
-function agentSystemPrompt({ state, user, agent, knowledge }) {
+export function agentSystemPrompt({ state, user, agent, knowledge }) {
   const skills = (state.skills ?? []).filter((skill) => (agent.skills ?? []).includes(skill.id))
+  // 已装到 Hermes 技能目录的，把 SKILL.md 正文一起给模型；没装或没正文的退回一句描述。
+  let budget = 30000
   const skillsText = skills.length
-    ? skills.map((skill) => `- ${skill.name}：${skill.description}`).join('\n')
+    ? skills
+        .map((skill) => {
+          const body = budget > 0 ? skillInstructions(skill.slug ?? '', Math.min(8000, budget)) : ''
+          if (!body) return `- ${skill.name}：${skill.description}`
+          budget -= body.length
+          return `### 技能：${skill.name}\n${skill.description}\n\n${body}`
+        })
+        .join('\n\n')
     : '- 无绑定技能，只使用基础对话与已授权知识。'
   const toolsText = (agent.tools ?? []).map((tool) => `- ${TOOL_LABELS[tool] ?? tool}`).join('\n') || '- 无'
   const memory = []

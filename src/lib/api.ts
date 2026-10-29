@@ -393,6 +393,76 @@ export const api = {
       dataDir: string
       uptimeSec: number
     }>('/api/status'),
+
+  /** 1Panel 式技能市场：索引来自远端仓库，正文安装时按需下载。 */
+  getMarket: () => request<MarketIndex>('/api/market'),
+
+  refreshMarket: () => request<MarketIndex>('/api/market/refresh', { method: 'POST' }),
+
+  setMarketSource: (source: string) =>
+    request<{ ok: boolean; source: MarketIndex['source'] }>('/api/market', {
+      method: 'PUT',
+      body: JSON.stringify({ source }),
+    }),
+
+  marketSkill: (slug: string) =>
+    request<{ slug: string; content: string; url: string }>(
+      `/api/market/skill?slug=${encodeURIComponent(slug)}`,
+    ),
+
+  /** 已安装到 Hermes 技能目录的技能。 */
+  listSkills: () =>
+    request<{ installed: InstalledSkill[]; root: string; exists: boolean; hermesHome: string }>(
+      '/api/skills',
+    ),
+
+  installSkill: (slug: string) =>
+    request<{ ok: boolean; installed: InstalledSkill; root: string }>('/api/skills/install', {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
+    }),
+
+  uninstallSkill: (slug: string) =>
+    request<{ ok: boolean }>(`/api/skills/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+}
+
+export interface InstalledSkill {
+  slug: string
+  name: string
+  version: string
+  category: string
+  categoryName: string
+  path: string
+  installedAt: string
+  bytes: number
+  files: number
+  sourceUrl: string
+  present: boolean
+}
+
+export interface MarketSkill {
+  slug: string
+  name: string
+  version: string
+  description: string
+  category: string
+  categoryName: string
+  path: string
+  sourceUrl: string
+}
+
+export interface MarketIndex {
+  name: string
+  updated: string
+  total: number
+  categories: { id: string; name: string; count: number }[]
+  skills: MarketSkill[]
+  indexUrl: string
+  fetchedAt: string
+  cached: boolean
+  stale: boolean
+  warning: string
+  source: { url: string; custom: boolean; updatedAt: string | null }
 }
 
 export interface ChatStreamHandlers {

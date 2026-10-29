@@ -151,7 +151,7 @@ export function Sidebar({
   const adminNav: NavItem[] = [
     { to: '/admin', label: '概览', icon: LayoutDashboard, end: true },
     { to: '/admin/agents', label: 'AI 助理', icon: Bot },
-    { to: '/admin/skills', label: 'Skills 中心', icon: Box, badge: pendingSkills },
+    { to: '/admin/skills', label: '技能中心', icon: Box, badge: pendingSkills },
     { to: '/admin/knowledge', label: '知识库', icon: BookOpen, badge: pendingDocs },
     { to: '/admin/connectors', label: '渠道接入', icon: Cable },
     { to: '/admin/members', label: '成员与岗位', icon: UsersRound, badge: invited },

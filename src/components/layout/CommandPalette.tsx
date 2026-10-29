@@ -103,7 +103,7 @@ export function CommandPalette({
         },
         {
           id: 'p-skills',
-          label: 'Skills 中心',
+          label: '技能中心',
           hint: '管理后台',
           group: '页面',
           icon: <Box size={15} />,

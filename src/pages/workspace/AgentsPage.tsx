@@ -197,7 +197,7 @@ export function WorkspaceAgentsPage() {
         </div>
         {currentUser?.role === 'admin' && (
           <Button size="sm" variant="secondary" onClick={() => navigate('/admin/skills')}>
-            <Wrench size={13} /> 前往 Skills 中心
+            <Wrench size={13} /> 前往 技能中心
           </Button>
         )}
       </div>

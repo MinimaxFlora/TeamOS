@@ -631,7 +631,7 @@ export function AgentEditorPage() {
                     </p>
                   </div>
                   <Button variant="ghost" size="sm" onClick={() => navigate('/admin/skills')}>
-                    <Wrench size={13} /> Skills 中心
+                    <Wrench size={13} /> 技能中心
                   </Button>
                 </div>
                 <div className="mt-3 grid gap-2 lg:grid-cols-2">
@@ -669,7 +669,7 @@ export function AgentEditorPage() {
                           onCheckedChange={(checked) => {
                             if (checked && unavailable) {
                               notify('该 Skill 当前不可用', {
-                                description: '先在 Skills 中心完成审核或启用。',
+                                description: '先在 技能中心完成审核或启用。',
                                 tone: 'warning',
                               })
                               return

@@ -166,3 +166,23 @@ curl http://127.0.0.1:8080/api/health
   检查 `/opt/data/logs/hermes.log` 和模型 API Key。
 - **GHCR 拉取 401**：执行 `make vps-login`，或把 package 改为 public。
 - **内存不足**：确认 `make vps-bootstrap` 已加 2G swap；Hermes 跑浏览器任务时内存会上升。
+
+## 9. 技能市场（SkillHub）
+
+技能中心顶部「技能市场」按 1Panel 应用商店的方式加载远程仓库：
+仓库里只有索引（`market.json`）和每个技能一个目录，**导入时才下载该技能的 `SKILL.md`**。
+
+```
+管理后台 → Skills 中心 → 技能市场
+  ├─ 市场源（默认 https://raw.githubusercontent.com/MinimaxFlora/TeamOS-Skills/main/market.json）
+  ├─ 分类 / 来源 / 排序 / 搜索
+  └─ 导入 → 进入待审核队列 → 审核启用 → 绑定给助理
+```
+
+- 索引由服务端缓存到 `/data/skill-market-cache.json`，有效期 6 小时；「刷新」强制回源。
+- GitHub raw 在国内 VPS 上经常不通，服务端会**自动回退到 jsDelivr 镜像**；也可以「更换」成自建镜像。
+- 正文下载失败时会回退到 SkillHub 原始接口；两者都失败则提示错误，不会写入半成品技能。
+- 默认市场源可以用环境变量 `SKILL_MARKET_SOURCE` 覆盖，管理员也能在界面里改（存数据库）。
+- 导入的技能带 `sourceUrl` 与 `slug`，重复导入会被识别；风险等级按正文关键词初判，仍需人工复核。
+
+仓库内容与筛选规则见 [MinimaxFlora/TeamOS-Skills](https://github.com/MinimaxFlora/TeamOS-Skills)。

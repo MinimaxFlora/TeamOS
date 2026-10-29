@@ -54,6 +54,8 @@ import {
   testModel,
 } from './hermes.mjs'
 import { runAgentChat, testAgentReply } from './chat.mjs'
+import { fetchSkillContent, loadMarket, marketStatus, setMarketSource } from './market.mjs'
+import { installSkill, listInstalled, skillsRootInfo, uninstallSkill } from './skills.mjs'
 import { summarizeTranscriptModel } from './minutes.mjs'
 import { acceptWebhook } from './webhooks.mjs'
 import { hashPassword, hmacHex, maskSecret, randomToken, sanitizeEmail, verifyPassword } from './security.mjs'
@@ -1451,6 +1453,99 @@ async function handleApi(req, res, url) {
     } finally {
       clearInterval(keepAlive)
     }
+    return
+  }
+
+  // ---- 技能市场（1Panel 式远程应用源）------------------------------------
+  if (pathname === '/api/market' && req.method === 'GET') {
+    const user = requireUser(req)
+    if (!user) sendError(res, 401, '请先登录')
+    let entry
+    try {
+      entry = await loadMarket()
+    } catch (error) {
+      sendError(res, 502, `技能市场加载失败：${error.message}`)
+    }
+    sendJson(res, 200, {
+      ...entry.market,
+      fetchedAt: entry.fetchedAt,
+      cached: Boolean(entry.cached),
+      stale: Boolean(entry.stale),
+      warning: entry.error ?? '',
+      source: marketStatus().source,
+    })
+    return
+  }
+
+  if (pathname === '/api/market' && req.method === 'PUT') {
+    const user = requireUser(req)
+    if (!isAdmin(user)) sendError(res, 403, '需要管理员权限')
+    const body = await readJson(req, 16 * 1024)
+    const result = setMarketSource(body.source, user.member_id)
+    if (!result.ok) sendError(res, 400, result.error)
+    sendJson(res, 200, { ok: true, source: marketStatus().source })
+    return
+  }
+
+  if (pathname === '/api/market/refresh' && req.method === 'POST') {
+    const user = requireUser(req)
+    if (!isAdmin(user)) sendError(res, 403, '需要管理员权限')
+    rateLimit(`market:${user.member_id}`, 6, 60 * 1000)
+    let entry
+    try {
+      entry = await loadMarket({ force: true })
+    } catch (error) {
+      sendError(res, 502, `刷新失败：${error.message}`)
+    }
+    sendJson(res, 200, {
+      ...entry.market,
+      fetchedAt: entry.fetchedAt,
+      cached: false,
+      warning: '',
+      source: marketStatus().source,
+    })
+    return
+  }
+
+  if (pathname === '/api/market/skill' && req.method === 'GET') {
+    const user = requireUser(req)
+    if (!user) sendError(res, 401, '请先登录')
+    const slug = url.searchParams.get('slug') ?? ''
+    const result = await fetchSkillContent(slug)
+    if (!result.ok) sendError(res, 404, result.error)
+    sendJson(res, 200, { slug, content: result.content, url: result.url })
+    return
+  }
+
+  // ---- 技能安装：落到 Hermes 技能目录 ------------------------------------
+  if (pathname === '/api/skills' && req.method === 'GET') {
+    const user = requireUser(req)
+    if (!user) sendError(res, 401, '请先登录')
+    sendJson(res, 200, { installed: listInstalled(), ...skillsRootInfo() })
+    return
+  }
+
+  if (pathname === '/api/skills/install' && req.method === 'POST') {
+    const user = requireUser(req)
+    if (!isAdmin(user)) sendError(res, 403, '需要管理员权限')
+    rateLimit(`skill-install:${user.member_id}`, 20, 60 * 1000)
+    const body = await readJson(req, 8 * 1024)
+    const slug = String(body.slug || '').trim()
+    if (!slug) sendError(res, 400, '缺少技能 ID')
+    const market = await loadMarket()
+    const result = await installSkill(slug, { ...market.market, source: marketStatus().source })
+    if (!result.ok) sendError(res, 400, result.error)
+    sendJson(res, 200, { ok: true, installed: result.installed, root: result.root })
+    return
+  }
+
+  const skillInstallMatch = /^\/api\/skills\/([A-Za-z0-9._-]{1,64})$/.exec(pathname)
+  if (skillInstallMatch && req.method === 'DELETE') {
+    const user = requireUser(req)
+    if (!isAdmin(user)) sendError(res, 403, '需要管理员权限')
+    const result = uninstallSkill(skillInstallMatch[1])
+    if (!result.ok) sendError(res, 400, result.error)
+    sendJson(res, 200, { ok: true })
     return
   }
 

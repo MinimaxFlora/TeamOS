@@ -66,6 +66,10 @@ export interface Agent {
   instructions: string
   tone: string
   escalation: string
+  /** 创建者；为空表示公司内置/管理员创建。 */
+  ownerId?: string
+  /** private 只有自己能用；company 全员可 @。 */
+  visibility?: 'private' | 'company'
   model: {
     provider: string
     id: string
@@ -95,6 +99,8 @@ export interface SkillChange {
 export interface Skill {
   id: string
   name: string
+  /** 市场里的唯一标识（apps/<slug>/），用于去重与后续升级。 */
+  slug?: string
   description: string
   category: string
   source: 'official' | 'custom' | 'imported'
@@ -112,6 +118,8 @@ export interface Skill {
   /** SKILL.md 正文；导入的技能保留原文，可编辑。 */
   content?: string
   sourceUrl?: string
+  /** 安装这个技能的人；用于「我的技能」与按人启用。 */
+  ownerId?: string
 }
 
 export interface Group {
@@ -193,6 +201,14 @@ export interface ChatSession {
   messageCount: number
   tokenEstimate: number
   createdBy?: string
+  /** 被邀请进这个会话的同事（不含创建者）。 */
+  participantIds?: string[]
+  /** 这个会话里可以 @ 的助理。 */
+  agentIds?: string[]
+  /** 会话里临时挂载的技能（/技能名）。 */
+  skillIds?: string[]
+  /** 交给 Hermes 管上下文时用的会话 key。 */
+  hermesSessionKey?: string
 }
 
 export interface KnowledgeSpace {

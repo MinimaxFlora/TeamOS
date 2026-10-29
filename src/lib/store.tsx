@@ -1,4 +1,4 @@
-import {
+﻿import {
   createContext,
   useCallback,
   useContext,
@@ -119,6 +119,7 @@ export interface StoreValue {
   deleteAgent: (id: string) => void
   createSkill: (input: {
     name: string
+    slug?: string
     description: string
     category: string
     source: 'custom' | 'imported'
@@ -748,6 +749,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const skill: Skill = {
         id,
         name: input.name.trim(),
+        slug: input.slug,
         description: input.description.trim(),
         category: input.category,
         source: input.source,
@@ -755,7 +757,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           input.sourceLabel ??
           (input.source === 'custom'
             ? `企业自建 · ${currentUser?.name ?? '管理员'}`
-            : 'Skills Hub · 手动导入'),
+            : 'SkillHub 市场 · 手动导入'),
         version: input.version?.trim() || '0.1.0',
         risk: input.risk ?? 'medium',
         status: 'review',

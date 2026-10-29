@@ -1,4 +1,4 @@
-import { getRawState, getState, listUsers, saveState, updateState } from './db.mjs'
+﻿import { getRawState, getState, listUsers, saveState, updateState } from './db.mjs'
 import { newId } from './auth.mjs'
 
 export const COMPANY_ROOM_ID = 'g_all'
@@ -102,7 +102,7 @@ export function bootstrapFirstAdmin(state, { member, companyName }) {
   }
 }
 
-const ADMIN_ONLY_KEYS = [
+const ADMIN_ONLY_KEYS = [ // agents / skills 现在由成员按 ownerId 自助维护
   'company',
   'agents',
   'skills',
@@ -159,6 +159,72 @@ export function mergeMemberState(serverState, incoming, user) {
     if (isOwnHuman || isOwnAgent || isOwnSystem) messages.set(message.id, message)
   }
   next.messages = [...messages.values()].slice(-5000)
+
+  // 员工可以维护自己名下的助理（ownerId === 自己），管理员建的公共助理只读。
+  const agents = new Map((serverState.agents ?? []).map((agent) => [agent.id, agent]))
+  const incomingAgentIds = new Set()
+  for (const agent of Array.isArray(incoming.agents) ? incoming.agents : []) {
+    if (!agent?.id) continue
+    incomingAgentIds.add(agent.id)
+    const current = agents.get(agent.id)
+    if (!current) {
+      if (agent.ownerId !== memberId) continue
+      agents.set(agent.id, {
+        ...agent,
+        ownerId: memberId,
+        visibility: agent.visibility === 'company' ? 'company' : 'private',
+        status: agent.status === 'published' ? 'published' : 'draft',
+      })
+      continue
+    }
+    if (current.ownerId !== memberId) continue
+    agents.set(agent.id, {
+      ...current,
+      name: safeText(agent.name, current.name, 40),
+      title: safeText(agent.title, current.title, 40),
+      department: safeText(agent.department, current.department, 40),
+      description: safeText(agent.description, current.description, 600),
+      responsibilities: Array.isArray(agent.responsibilities)
+        ? agent.responsibilities.slice(0, 12)
+        : current.responsibilities,
+      instructions: safeText(agent.instructions, current.instructions, 4000),
+      tone: safeText(agent.tone, current.tone, 200),
+      skills: Array.isArray(agent.skills) ? agent.skills.slice(0, 24) : current.skills,
+      tools: Array.isArray(agent.tools) ? agent.tools.slice(0, 12) : current.tools,
+      knowledge: Array.isArray(agent.knowledge) ? agent.knowledge.slice(0, 12) : current.knowledge,
+      visibility: agent.visibility === 'company' ? 'company' : 'private',
+      status: agent.status === 'published' ? 'published' : current.status,
+      updatedAt: nowISO(),
+    })
+  }
+  for (const [id, agent] of agents) {
+    if (agent.ownerId === memberId && !incomingAgentIds.has(id)) agents.delete(id)
+  }
+  next.agents = [...agents.values()]
+
+  // 员工自己安装的技能：只能维护 ownerId === 自己的记录。
+  const skills = new Map((serverState.skills ?? []).map((skill) => [skill.id, skill]))
+  const incomingSkillIds = new Set()
+  for (const skill of Array.isArray(incoming.skills) ? incoming.skills : []) {
+    if (!skill?.id) continue
+    incomingSkillIds.add(skill.id)
+    const current = skills.get(skill.id)
+    if (!current) {
+      if (skill.ownerId !== memberId) continue
+      skills.set(skill.id, { ...skill, status: 'enabled' })
+      continue
+    }
+    if (current.ownerId !== memberId) continue
+    skills.set(skill.id, {
+      ...current,
+      status: skill.status === 'disabled' ? 'disabled' : 'enabled',
+      updatedAt: nowISO(),
+    })
+  }
+  for (const [id, skill] of skills) {
+    if (skill.ownerId === memberId && !incomingSkillIds.has(id)) skills.delete(id)
+  }
+  next.skills = [...skills.values()]
 
   const runs = new Map((serverState.runs ?? []).map((run) => [run.id, run]))
   for (const run of Array.isArray(incoming.runs) ? incoming.runs : []) {

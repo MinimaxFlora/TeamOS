@@ -1,24 +1,38 @@
-import {
+﻿import {
+  BarChart3,
+  BookOpen,
+  Bot,
   Box,
+  Briefcase,
   Check,
   CheckCircle2,
   ChevronRight,
+  Code2,
   FileText,
   FileUp,
-  Library,
+  Globe,
+  GraduationCap,
+  LifeBuoy,
   Loader2,
+  Palette,
+  PenLine,
   Pencil,
   Plus,
   Power,
+  RefreshCw,
   Search,
   ShieldCheck,
+  Sparkles,
   Trash2,
   TriangleAlert,
   Users,
+  Wrench,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import type { LucideIcon } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import { api, type InstalledSkill, type MarketIndex, type MarketSkill } from '../../lib/api'
 import { useStore } from '../../lib/store'
 import type { Risk, Skill } from '../../lib/types'
 import { SKILL_CATEGORIES } from '../../lib/seed'
@@ -38,6 +52,7 @@ import {
 } from '../../components/ui/dialog'
 import { EmptyState } from '../../components/ui/empty-state'
 import { Checkbox, Field, Input, Select, Textarea } from '../../components/ui/input'
+import { Tabs, TabsList, TabsTrigger } from '../../components/ui/tabs'
 
 type StatusFilter = 'all' | Skill['status']
 
@@ -50,16 +65,83 @@ const PERMISSION_OPTIONS = [
   '执行服务器命令',
 ]
 
+/** 技能源的分类 → TeamOS 自己的中文分类，保证筛选器与助理绑定都能复用。 */
+const MARKET_CATEGORY_MAP: Record<string, string> = {
+  'office-efficiency': '文档处理',
+  'content-creation': '内容创作',
+  development: '编程开发',
+  'dev-programming': '编程开发',
+  'data-analysis': '数据分析',
+  'design-media': '内容创作',
+  'ai-agent': '自动化',
+  'knowledge-management': '知识检索',
+  'business-operations': '销售增长',
+  'business-ops': '销售增长',
+  education: '信息整理',
+  'industry-experts': '通用',
+  'life-services': '通用',
+}
+
+/** 卡片配色/图标按分类轮转，和 1Panel 应用商店的卡片观感一致。 */
+const CATEGORY_STYLE: Record<string, { icon: LucideIcon; tone: string }> = {
+  'office-efficiency': { icon: FileText, tone: 'bg-accent-soft text-accent-strong' },
+  'content-creation': { icon: PenLine, tone: 'bg-warning-soft text-warning' },
+  development: { icon: Code2, tone: 'bg-success-soft text-success' },
+  'dev-programming': { icon: Code2, tone: 'bg-success-soft text-success' },
+  'data-analysis': { icon: BarChart3, tone: 'bg-accent-soft text-accent-strong' },
+  'design-media': { icon: Palette, tone: 'bg-danger-soft text-danger' },
+  'ai-agent': { icon: Bot, tone: 'bg-warning-soft text-warning' },
+  'knowledge-management': { icon: BookOpen, tone: 'bg-success-soft text-success' },
+  'business-operations': { icon: Briefcase, tone: 'bg-danger-soft text-danger' },
+  education: { icon: GraduationCap, tone: 'bg-accent-soft text-accent-strong' },
+  'industry-experts': { icon: Wrench, tone: 'bg-warning-soft text-warning' },
+  'life-services': { icon: LifeBuoy, tone: 'bg-success-soft text-success' },
+}
+
+const FALLBACK_STYLES = [
+  { icon: Sparkles, tone: 'bg-accent-soft text-accent-strong' },
+  { icon: Box, tone: 'bg-warning-soft text-warning' },
+  { icon: Wrench, tone: 'bg-success-soft text-success' },
+]
+
+function categoryStyle(key: string) {
+  return CATEGORY_STYLE[key] ?? FALLBACK_STYLES[0]
+}
+
+/** SKILL.md 里出现这些字样就按高风险处理，交给管理员复核。 */
+function guessRisk(text: string): Risk {
+  if (/(shell|命令行|终端|执行命令|bash|exec\(|credential|api[_ -]?key|密钥|浏览器自动化)/i.test(text)) {
+    return 'high'
+  }
+  if (/(写入|保存文件|数据库|sql|http|接口调用|上传|upload)/i.test(text)) return 'medium'
+  return 'low'
+}
+
 export function AdminSkillsPage() {
   const { state, currentUser, notify, createSkill, deleteSkill, setSkillStatus, updateSkill } = useStore()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
+
+  const [tab, setTab] = useState('market')
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [category, setCategory] = useState('all')
   const [source, setSource] = useState('all')
+
+  const [market, setMarket] = useState<MarketIndex | null>(null)
+  const [marketLoading, setMarketLoading] = useState(true)
+  const [marketError, setMarketError] = useState('')
+  const [marketQuery, setMarketQuery] = useState('')
+  const [marketCategory, setMarketCategory] = useState('all')
+  const [adding, setAdding] = useState<string[]>([])
+  const [installed, setInstalled] = useState<InstalledSkill[]>([])
+  const [skillsRoot, setSkillsRoot] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+  const [sourceOpen, setSourceOpen] = useState(false)
+  const [sourceDraft, setSourceDraft] = useState('')
+  const [savingSource, setSavingSource] = useState(false)
+
   const [addOpen, setAddOpen] = useState(false)
-  const [libraryOpen, setLibraryOpen] = useState(false)
   const [action, setAction] = useState<{ type: 'reject' | 'disable' | 'delete'; skill: Skill } | null>(null)
 
   const selectedSkill = state.skills.find((skill) => skill.id === searchParams.get('skill')) ?? null
@@ -70,6 +152,61 @@ export function AdminSkillsPage() {
     disabled: state.skills.filter((skill) => skill.status === 'disabled').length,
     high: state.skills.filter((skill) => skill.risk === 'high').length,
   }
+
+  const loadMarket = useCallback(
+    async (force = false) => {
+      setMarketLoading(true)
+      setMarketError('')
+      if (force) setRefreshing(true)
+      try {
+        const data = force ? await api.refreshMarket() : await api.getMarket()
+        setMarket(data)
+        setSourceDraft(data.source.url)
+      } catch (reason) {
+        setMarketError(reason instanceof Error ? reason.message : '读取技能源失败')
+      } finally {
+        setMarketLoading(false)
+        setRefreshing(false)
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    void loadMarket(false)
+  }, [loadMarket])
+
+  const loadInstalled = useCallback(async () => {
+    try {
+      const data = await api.listSkills()
+      setInstalled(data.installed)
+      setSkillsRoot(data.root)
+    } catch {
+      // 技能目录还没建好时忽略，卡片按「未安装」显示
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadMarket(false)
+    void loadInstalled()
+  }, [loadMarket, loadInstalled])
+
+  const installedKeys = useMemo(() => new Set(installed.map((item) => item.slug)), [installed])
+
+  const isInstalled = (item: MarketSkill) => installedKeys.has(item.slug)
+  const recordFor = (item: MarketSkill) =>
+    state.skills.find((skill) => (skill.slug ? skill.slug === item.slug : skill.name === item.name)) ?? null
+
+  const marketSkills = market?.skills ?? []
+  const visibleMarket = useMemo(() => {
+    const needle = marketQuery.trim().toLowerCase()
+    return marketSkills
+      .filter((item) => marketCategory === 'all' || item.category === marketCategory)
+      .filter((item) => {
+        if (!needle) return true
+        return `${item.name} ${item.description} ${item.categoryName}`.toLowerCase().includes(needle)
+      })
+  }, [marketCategory, marketQuery, marketSkills])
 
   const visible = useMemo(() => {
     const needle = query.trim()
@@ -99,19 +236,88 @@ export function AdminSkillsPage() {
     setSearchParams(next, { replace: true })
   }
 
+  const addFromMarket = async (item: MarketSkill) => {
+    if (adding.includes(item.slug) || isInstalled(item)) return
+    setAdding((prev) => [...prev, item.slug])
+    try {
+      // 1) 真安装：把技能目录写进 Hermes 的 skills/，脚本与 references 一起落盘
+      const result = await api.installSkill(item.slug)
+      // 2) 登记一条技能，才能被助理绑定、进审核队列
+      const { content } = await api.marketSkill(item.slug).catch(() => ({ content: '' }))
+      const id = createSkill({
+        name: item.name,
+        slug: item.slug,
+        description: item.description,
+        category: MARKET_CATEGORY_MAP[item.category] ?? '通用',
+        source: 'imported',
+        version: item.version || '1.0.0',
+        risk: guessRisk(content),
+        permissions: [],
+        content,
+        sourceUrl: result.installed?.sourceUrl,
+        sourceLabel: 'TeamOS-Skills',
+        author: 'TeamOS-Skills',
+        license: '见源站',
+      })
+      setInstalled((prev) => [...prev.filter((s) => s.slug !== item.slug), { ...result.installed }])
+      notify('已安装到 Hermes', {
+        description: `${item.name} 已写入技能目录，并在技能中心登记为待审核。`,
+        tone: 'success',
+      })
+      openSkill(id)
+    } catch (reason) {
+      notify('安装失败', {
+        description: reason instanceof Error ? reason.message : '安装技能失败',
+        tone: 'danger',
+      })
+    } finally {
+      setAdding((prev) => prev.filter((slug) => slug !== item.slug))
+    }
+  }
+
+  const removeSkill = async (skill: Skill) => {
+    if (skill.slug) {
+      try {
+        await api.uninstallSkill(skill.slug)
+        setInstalled((prev) => prev.filter((item) => item.slug !== skill.slug))
+      } catch {
+        // 磁盘目录已经不在也算卸载成功
+      }
+    }
+    deleteSkill(skill.id)
+    closeSkill()
+  }
+
+  const saveSource = async () => {
+    setSavingSource(true)
+    try {
+      await api.setMarketSource(sourceDraft.trim())
+      setSourceOpen(false)
+      await loadMarket(true)
+      notify('技能源已更新', { tone: 'success' })
+    } catch (reason) {
+      notify('技能源保存失败', {
+        description: reason instanceof Error ? reason.message : '地址不合法',
+        tone: 'danger',
+      })
+    } finally {
+      setSavingSource(false)
+    }
+  }
+
   return (
     <PageBody>
       <PageHeader
-        eyebrow="管理后台 · Skills"
-        title="Skills 中心"
-        description="技能是可执行扩展。导入或自建后先进入审核，确认权限、来源与风险后，才能绑定给助理。"
+        eyebrow="管理后台 · 技能"
+        title="技能中心"
+        description="技能是可执行扩展。从技能源添加后先进入审核，确认权限、来源与风险后，才能绑定给助理。"
         actions={
           <>
-            <Button variant="secondary" size="sm" onClick={() => setLibraryOpen(true)}>
-              <Library size={14} /> 技能仓库
+            <Button variant="secondary" size="sm" disabled={refreshing} onClick={() => void loadMarket(true)}>
+              {refreshing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} 刷新
             </Button>
             <Button variant="primary" size="sm" onClick={() => setAddOpen(true)}>
-              <Plus size={14} /> 添加 Skill
+              <Plus size={14} /> 自定义技能
             </Button>
           </>
         }
@@ -138,204 +344,334 @@ export function AdminSkillsPage() {
         ))}
       </div>
 
-      {reviewSkills.length > 0 && (
-        <section className="mb-5 rounded-xl border border-warning/25 bg-warning-soft/60 p-3.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-warning-soft text-warning">
-              <TriangleAlert size={13} />
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="text-[12px] font-semibold text-ink">
-                {reviewSkills.length} 个 Skill 等待审核
-              </div>
-              <p className="mt-0.5 text-[10.5px] leading-4 text-muted">
-                核对来源、权限与风险后再启用。高风险技能会要求额外确认。
-              </p>
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                setStatusFilter('review')
-                setQuery('')
-                setCategory('all')
-                setSource('all')
-              }}
-            >
-              只看待审核
-            </Button>
-          </div>
-          <div className="mt-2.5 flex flex-wrap gap-1.5">
-            {reviewSkills.slice(0, 3).map((skill) => (
+      <Tabs value={tab} onValueChange={setTab}>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <TabsList variant="pills">
+            <TabsTrigger variant="pills" value="market">
+              技能市场
+              <span className="text-[10px] tabular text-faint">{market ? market.total : '—'}</span>
+            </TabsTrigger>
+            <TabsTrigger variant="pills" value="installed">
+              已安装
+              <span className="text-[10px] tabular text-faint">{installed.length}</span>
+            </TabsTrigger>
+          </TabsList>
+          {tab === 'market' && (
+            <span className="hidden items-center gap-1.5 text-[10.5px] text-faint sm:flex">
+              <Globe size={11} />
+              <span className="max-w-[280px] truncate font-mono" title={market?.source.url}>
+                {market?.source.url ?? '—'}
+              </span>
               <button
-                key={skill.id}
                 type="button"
-                onClick={() => openSkill(skill.id)}
-                className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface px-2 py-1 text-[11px] text-ink-soft transition-colors hover:border-accent-line hover:text-ink"
+                onClick={() => setSourceOpen((prev) => !prev)}
+                className="text-accent hover:underline"
               >
-                <AgentIconGlyph icon={skill.icon} size={11} />
-                {skill.name}
-                <RiskBadge risk={skill.risk} />
-                <ChevronRight size={11} className="text-faint" />
+                更换
               </button>
-            ))}
-            {reviewSkills.length > 3 && (
-              <span className="px-1 py-1 text-[10.5px] text-muted">+{reviewSkills.length - 3}</span>
-            )}
-          </div>
-        </section>
-      )}
+            </span>
+          )}
+        </div>
 
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="relative">
-          <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint" />
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索 Skill"
-            aria-label="搜索 Skill"
-            className="h-8 w-[190px] rounded-lg border border-line bg-surface pl-7 pr-2.5 text-[12px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/10"
-          />
-        </div>
-        <div className="no-scrollbar flex items-center gap-1 overflow-x-auto">
-          {(
-            [
-              ['all', `全部 ${state.skills.length}`],
-              ['enabled', `已启用 ${counts.enabled}`],
-              ['review', `待审核 ${counts.review}`],
-              ['disabled', `已停用 ${counts.disabled}`],
-            ] as const
-          ).map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setStatusFilter(key)}
-              className={cn(
-                'shrink-0 rounded-md px-2 py-1 text-[11px] transition-colors',
-                statusFilter === key
-                  ? 'bg-accent-soft font-medium text-accent-strong'
-                  : 'text-muted hover:bg-sunken hover:text-ink',
-              )}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <div className="ml-auto flex items-center gap-1.5">
-          <Select
-            value={category}
-            onChange={(event) => setCategory(event.target.value)}
-            className="h-8 w-[124px] text-[11.5px]"
-            aria-label="按分类筛选"
-          >
-            <option value="all">全部分类</option>
-            {SKILL_CATEGORIES.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={source}
-            onChange={(event) => setSource(event.target.value)}
-            className="h-8 w-[112px] text-[11.5px]"
-            aria-label="按来源筛选"
-          >
-            <option value="all">全部来源</option>
-            <option value="official">TeamOS 官方</option>
-            <option value="custom">企业自建</option>
-            <option value="imported">Skills Hub</option>
-          </Select>
-        </div>
-      </div>
-
-      <div className="overflow-hidden rounded-xl border border-line bg-surface shadow-card">
-        <div className="hidden grid-cols-[minmax(0,1.7fr)_100px_90px_100px_minmax(0,1fr)_100px_24px] gap-3 border-b border-line bg-raised px-4 py-2 text-[10px] font-medium uppercase tracking-[0.08em] text-faint md:grid">
-          <span>Skill</span>
-          <span>分类</span>
-          <span>风险</span>
-          <span>状态</span>
-          <span>绑定助理</span>
-          <span>更新</span>
-          <span />
-        </div>
-        {visible.length === 0 ? (
-          <div className="p-3">
-            <EmptyState
-              icon={Box}
-              title="没有匹配的 Skill"
-              description="调整筛选条件，或添加一个新的技能。"
-              compact
-              action={
-                <Button size="sm" variant="secondary" onClick={() => setAddOpen(true)}>
-                  <Plus size={13} /> 添加 Skill
+        {tab === 'market' && (
+          <div className="space-y-3">
+            {sourceOpen && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-accent-line bg-accent-soft/40 px-3 py-2.5">
+                <input
+                  value={sourceDraft}
+                  onChange={(event) => setSourceDraft(event.target.value)}
+                  placeholder="https://raw.githubusercontent.com/<owner>/<repo>/main/catalog.json"
+                  className="h-8 min-w-[260px] flex-1 rounded-lg border border-line bg-surface px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/10"
+                />
+                <Button size="sm" variant="primary" disabled={savingSource} onClick={() => void saveSource()}>
+                  {savingSource ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />} 保存并重载
                 </Button>
-              }
-            />
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative w-full max-w-[240px]">
+                <Search
+                  size={13}
+                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
+                />
+                <input
+                  value={marketQuery}
+                  onChange={(event) => setMarketQuery(event.target.value)}
+                  placeholder="搜索技能名称或说明"
+                  aria-label="搜索技能"
+                  className="h-8 w-full rounded-lg border border-line bg-surface pl-7 pr-2.5 text-[12px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/10"
+                />
+              </div>
+              <div className="no-scrollbar flex items-center gap-1 overflow-x-auto">
+                <button
+                  type="button"
+                  onClick={() => setMarketCategory('all')}
+                  className={cn(
+                    'shrink-0 rounded-md px-2 py-1 text-[11px] transition-colors',
+                    marketCategory === 'all'
+                      ? 'bg-accent-soft font-medium text-accent-strong'
+                      : 'text-muted hover:bg-sunken hover:text-ink',
+                  )}
+                >
+                  全部 {market?.total ?? 0}
+                </button>
+                {(market?.categories ?? []).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setMarketCategory(item.id)}
+                    className={cn(
+                      'shrink-0 rounded-md px-2 py-1 text-[11px] transition-colors',
+                      marketCategory === item.id
+                        ? 'bg-accent-soft font-medium text-accent-strong'
+                        : 'text-muted hover:bg-sunken hover:text-ink',
+                    )}
+                  >
+                    {item.name} {item.count}
+                  </button>
+                ))}
+              </div>
+              <span className="ml-auto text-[10.5px] text-faint">
+                {marketLoading ? '正在读取技能源…' : `${visibleMarket.length} 个技能`}
+              </span>
+            </div>
+
+            {marketError && (
+              <p className="rounded-lg bg-danger-soft px-3 py-2 text-[11.5px] text-danger">{marketError}</p>
+            )}
+            {market?.stale && (
+              <p className="rounded-lg bg-warning-soft px-3 py-2 text-[11.5px] text-warning">
+                技能源暂时访问不了，正在使用缓存
+                {market.warning ? `（${market.warning}）` : ''}。
+              </p>
+            )}
+
+            {marketLoading && !market ? (
+              <div className="flex items-center justify-center gap-2 py-16 text-[12px] text-muted">
+                <Loader2 size={14} className="animate-spin" /> 正在加载技能…
+              </div>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {visibleMarket.map((item) => (
+                  <SkillCard
+                    key={item.slug}
+                    item={item}
+                    installed={isInstalled(item)}
+                    record={recordFor(item)}
+                    busy={adding.includes(item.slug)}
+                    onAdd={() => void addFromMarket(item)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {!marketLoading && visibleMarket.length === 0 && (
+              <EmptyState
+                icon={Box}
+                title="没有匹配的技能"
+                description="换个关键词或分类试试；也可以「更换」技能源地址。"
+                compact
+              />
+            )}
+
+            <p className="text-[10px] leading-4 text-faint">
+              技能来自 {market?.name ?? 'TeamOS-Skills'} 仓库（更新于 {market?.updated || '—'}）。
+              点「+」会把整个技能目录（SKILL.md + scripts + references）写进{' '}
+              <code className="font-mono">{skillsRoot || 'Hermes 技能目录'}</code>，同时登记为待审核；
+              审核通过后绑定到助理，助理才能用它。
+            </p>
           </div>
-        ) : (
-          visible.map((skill) => {
-            const agents = state.agents.filter((agent) => skill.agentIds.includes(agent.id))
-            return (
-              <button
-                key={skill.id}
-                type="button"
-                onClick={() => openSkill(skill.id)}
-                className="flex w-full flex-col gap-2 border-b border-line px-3 py-3 text-left transition-colors last:border-b-0 hover:bg-raised md:grid md:grid-cols-[minmax(0,1.7fr)_100px_90px_100px_minmax(0,1fr)_100px_24px] md:items-center md:gap-3 md:px-4"
-              >
-                <div className="flex min-w-0 items-start gap-2.5">
-                  <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sunken text-ink-soft">
-                    <AgentIconGlyph icon={skill.icon} size={15} />
+        )}
+
+        {tab === 'installed' && (
+          <div>
+            {reviewSkills.length > 0 && (
+              <section className="mb-4 rounded-xl border border-warning/25 bg-warning-soft/60 p-3.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-warning-soft text-warning">
+                    <TriangleAlert size={13} />
                   </span>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="truncate text-[12.5px] font-medium text-ink">{skill.name}</span>
-                      <span className="text-[9.5px] tabular text-faint">v{skill.version}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[12px] font-semibold text-ink">
+                      {reviewSkills.length} 个技能等待审核
                     </div>
-                    <p className="mt-0.5 line-clamp-1 text-[10.5px] text-muted">{skill.description}</p>
-                    <p className="mt-0.5 text-[9.5px] text-faint">
-                      {skill.sourceLabel} · {skill.license}
+                    <p className="mt-0.5 text-[10.5px] leading-4 text-muted">
+                      核对来源、权限与风险后再启用。高风险技能会要求额外确认。
                     </p>
                   </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setStatusFilter('review')
+                      setQuery('')
+                      setCategory('all')
+                      setSource('all')
+                    }}
+                  >
+                    只看待审核
+                  </Button>
                 </div>
+              </section>
+            )}
 
-                <div className="hidden text-[11px] text-muted md:block">{skill.category}</div>
-                <div className="hidden md:block">
-                  <RiskBadge risk={skill.risk} />
-                </div>
-                <div>
-                  <StatusPill status={skill.status} />
-                </div>
-                <div className="hidden items-center gap-1 md:flex">
-                  {agents.slice(0, 3).map((agent) => (
-                    <span key={agent.id} title={agent.name}>
-                      <AgentAvatar icon={agent.icon} color={agent.color} size="xs" />
-                    </span>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search
+                  size={13}
+                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
+                />
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="搜索已安装技能"
+                  aria-label="搜索已安装技能"
+                  className="h-8 w-[190px] rounded-lg border border-line bg-surface pl-7 pr-2.5 text-[12px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/10"
+                />
+              </div>
+              <div className="no-scrollbar flex items-center gap-1 overflow-x-auto">
+                {(
+                  [
+                    ['all', `全部 ${state.skills.length}`],
+                    ['enabled', `已启用 ${counts.enabled}`],
+                    ['review', `待审核 ${counts.review}`],
+                    ['disabled', `已停用 ${counts.disabled}`],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setStatusFilter(key)}
+                    className={cn(
+                      'shrink-0 rounded-md px-2 py-1 text-[11px] transition-colors',
+                      statusFilter === key
+                        ? 'bg-accent-soft font-medium text-accent-strong'
+                        : 'text-muted hover:bg-sunken hover:text-ink',
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="ml-auto flex items-center gap-1.5">
+                <Select
+                  value={category}
+                  onChange={(event) => setCategory(event.target.value)}
+                  className="h-8 w-[124px] text-[11.5px]"
+                  aria-label="按分类筛选"
+                >
+                  <option value="all">全部分类</option>
+                  {SKILL_CATEGORIES.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
                   ))}
-                  {agents.length > 3 && (
-                    <span className="text-[10px] text-faint">+{agents.length - 3}</span>
-                  )}
-                  {agents.length === 0 && <span className="text-[10px] text-faint">未绑定</span>}
-                </div>
-                <div className="hidden text-[10.5px] text-faint md:block">
-                  {formatRelative(skill.updatedAt)}
-                </div>
-                <div className="ml-auto flex items-center gap-2 text-faint md:ml-0 md:justify-end">
-                  <span className="text-[10px] md:hidden">
-                    {skill.category} · {formatRelative(skill.updatedAt)}
-                  </span>
-                  <ChevronRight size={14} />
-                </div>
-              </button>
-            )
-          })
-        )}
-      </div>
+                </Select>
+                <Select
+                  value={source}
+                  onChange={(event) => setSource(event.target.value)}
+                  className="h-8 w-[112px] text-[11.5px]"
+                  aria-label="按来源筛选"
+                >
+                  <option value="all">全部来源</option>
+                  <option value="official">TeamOS 官方</option>
+                  <option value="custom">企业自建</option>
+                  <option value="imported">TeamOS-Skills</option>
+                </Select>
+              </div>
+            </div>
 
-      <p className="mt-3 flex items-start gap-1.5 text-[10.5px] leading-5 text-faint">
-        <ShieldCheck size={11} className="mt-0.5 shrink-0" />
-        Skill 的 SKILL.md 会作为助理的提示与工作流说明使用，不会执行文件里的代码。仓库导入的技能保留原文与来源链接，方便审计与更新。
-      </p>
+            <div className="overflow-hidden rounded-xl border border-line bg-surface shadow-card">
+              <div className="hidden grid-cols-[minmax(0,1.7fr)_100px_90px_100px_minmax(0,1fr)_100px_24px] gap-3 border-b border-line bg-raised px-4 py-2 text-[10px] font-medium uppercase tracking-[0.08em] text-faint md:grid">
+                <span>技能</span>
+                <span>分类</span>
+                <span>风险</span>
+                <span>状态</span>
+                <span>绑定助理</span>
+                <span>更新</span>
+                <span />
+              </div>
+              {visible.length === 0 ? (
+                <div className="p-3">
+                  <EmptyState
+                    icon={Box}
+                    title="还没有安装技能"
+                    description="去「技能市场」挑几个，或添加一个自定义技能。"
+                    compact
+                    action={
+                      <Button size="sm" variant="secondary" onClick={() => setTab('market')}>
+                        去技能市场
+                      </Button>
+                    }
+                  />
+                </div>
+              ) : (
+                visible.map((skill) => {
+                  const agents = state.agents.filter((agent) => skill.agentIds.includes(agent.id))
+                  return (
+                    <button
+                      key={skill.id}
+                      type="button"
+                      onClick={() => openSkill(skill.id)}
+                      className="flex w-full flex-col gap-2 border-b border-line px-3 py-3 text-left transition-colors last:border-b-0 hover:bg-raised md:grid md:grid-cols-[minmax(0,1.7fr)_100px_90px_100px_minmax(0,1fr)_100px_24px] md:items-center md:gap-3 md:px-4"
+                    >
+                      <div className="flex min-w-0 items-start gap-2.5">
+                        <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sunken text-ink-soft">
+                          <AgentIconGlyph icon={skill.icon} size={15} />
+                        </span>
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="truncate text-[12.5px] font-medium text-ink">{skill.name}</span>
+                            <span className="text-[9.5px] tabular text-faint">v{skill.version}</span>
+                          </div>
+                          <p className="mt-0.5 line-clamp-1 text-[10.5px] text-muted">{skill.description}</p>
+                          <p className="mt-0.5 text-[9.5px] text-faint">
+                            {skill.sourceLabel} · {skill.license}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="hidden text-[11px] text-muted md:block">{skill.category}</div>
+                      <div className="hidden md:block">
+                        <RiskBadge risk={skill.risk} />
+                      </div>
+                      <div>
+                        <StatusPill status={skill.status} />
+                      </div>
+                      <div className="hidden items-center gap-1 md:flex">
+                        {agents.slice(0, 3).map((agent) => (
+                          <span key={agent.id} title={agent.name}>
+                            <AgentAvatar icon={agent.icon} color={agent.color} size="xs" />
+                          </span>
+                        ))}
+                        {agents.length > 3 && (
+                          <span className="text-[10px] text-faint">+{agents.length - 3}</span>
+                        )}
+                        {agents.length === 0 && <span className="text-[10px] text-faint">未绑定</span>}
+                      </div>
+                      <div className="hidden text-[10.5px] text-faint md:block">
+                        {formatRelative(skill.updatedAt)}
+                      </div>
+                      <div className="ml-auto flex items-center gap-2 text-faint md:ml-0 md:justify-end">
+                        <span className="text-[10px] md:hidden">
+                          {skill.category} · {formatRelative(skill.updatedAt)}
+                        </span>
+                        <ChevronRight size={14} />
+                      </div>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+
+            <p className="mt-3 flex items-start gap-1.5 text-[10.5px] leading-5 text-faint">
+              <ShieldCheck size={11} className="mt-0.5 shrink-0" />
+              技能的 SKILL.md 会作为助理的提示与工作流说明使用，不会执行文件里的代码。导入的技能保留原文与来源链接，方便审计与更新。
+            </p>
+          </div>
+        )}
+      </Tabs>
 
       <AddSkillDialog
         open={addOpen}
@@ -343,19 +679,11 @@ export function AdminSkillsPage() {
         existing={state.skills}
         currentUserName={currentUser?.name ?? '管理员'}
         onCreate={(id) => {
-          const next = new URLSearchParams(searchParams)
-          next.set('skill', id)
-          setSearchParams(next)
+          setTab('installed')
+          openSkill(id)
         }}
         createSkill={createSkill}
         notify={notify}
-      />
-
-      <SkillLibraryDialog
-        open={libraryOpen}
-        onOpenChange={setLibraryOpen}
-        existing={state.skills}
-        createSkill={createSkill}
       />
 
       <SkillDetailDialog
@@ -378,17 +706,18 @@ export function AdminSkillsPage() {
         }
         description={
           action?.type === 'delete'
-            ? `这个 Skill 会从 ${action.skill.agentIds.length} 个助理解除绑定并删除，无法撤销。`
+            ? `这个技能会从 ${action.skill.agentIds.length} 个助理解除绑定并删除，无法撤销。`
             : action?.type === 'reject'
               ? '拒绝后状态变为已停用，不会绑定给任何助理。你之后仍可以重新审核启用。'
               : `停用后助理不能继续使用它；如果助理包含这个技能，发布检查会阻止发布。已绑定的 ${action?.skill.agentIds.length ?? 0} 个助理会受影响。`
         }
-        confirmLabel={action?.type === 'delete' ? '删除 Skill' : action?.type === 'reject' ? '拒绝并停用' : '停用 Skill'}
+        confirmLabel={
+          action?.type === 'delete' ? '删除技能' : action?.type === 'reject' ? '拒绝并停用' : '停用技能'
+        }
         onConfirm={() => {
           if (!action) return
           if (action.type === 'delete') {
-            deleteSkill(action.skill.id)
-            closeSkill()
+            void removeSkill(action.skill)
           } else {
             setSkillStatus(action.skill.id, 'disabled')
           }
@@ -396,6 +725,62 @@ export function AdminSkillsPage() {
         }}
       />
     </PageBody>
+  )
+}
+
+function SkillCard({
+  item,
+  installed,
+  record,
+  busy,
+  onAdd,
+}: {
+  item: MarketSkill
+  installed: boolean
+  record: Skill | null
+  busy: boolean
+  onAdd: () => void
+}) {
+  const style = categoryStyle(item.category)
+  const Icon = style.icon
+  return (
+    <div className="group relative flex min-h-[104px] items-start gap-3 rounded-xl border border-line bg-surface px-3.5 py-3.5 shadow-card transition-colors hover:border-accent-line">
+      <span
+        className={cn(
+          'inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
+          style.tone,
+        )}
+      >
+        <Icon size={18} />
+      </span>
+      <div className="min-w-0 flex-1 pr-7">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="truncate text-[13px] font-medium text-ink">{item.name}</span>
+          {item.version && <span className="text-[9.5px] tabular text-faint">v{item.version}</span>}
+          {record && <StatusPill status={record.status} />}
+        </div>
+        <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted">{item.description}</p>
+        <p className="mt-1 flex items-center gap-1.5 text-[9.5px] text-faint">
+          <span>{item.categoryName}</span>
+          <span className="truncate font-mono opacity-70">{item.slug}</span>
+        </p>
+      </div>
+      <button
+        type="button"
+        aria-label={installed ? `${item.name} 已安装` : `安装 ${item.name}`}
+        title={installed ? '已安装到 Hermes 技能目录' : '安装到 Hermes 技能目录'}
+        disabled={installed || busy}
+        onClick={onAdd}
+        className={cn(
+          'absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors',
+          installed
+            ? 'border-success/30 bg-success-soft text-success'
+            : 'border-line-strong bg-surface text-muted hover:border-accent hover:text-accent disabled:opacity-60',
+        )}
+      >
+        {busy ? <Loader2 size={13} className="animate-spin" /> : installed ? <Check size={13} /> : <Plus size={13} />}
+      </button>
+    </div>
   )
 }
 
@@ -479,7 +864,7 @@ function AddSkillDialog({
 
   const handleCreate = () => {
     if (!name.trim()) {
-      notify('请填写 Skill 名称。', { tone: 'warning' })
+      notify('请填写技能名称。', { tone: 'warning' })
       return
     }
     if (!description.trim() && !content.trim()) {
@@ -487,7 +872,7 @@ function AddSkillDialog({
       return
     }
     if (existing.some((skill) => skill.name === name.trim())) {
-      notify('已存在同名 Skill', { description: '换一个名字，避免助理与审计记录混淆。', tone: 'warning' })
+      notify('已存在同名技能', { description: '换一个名字，避免助理与审计记录混淆。', tone: 'warning' })
       return
     }
     const id = createSkill({
@@ -516,8 +901,8 @@ function AddSkillDialog({
     >
       <DialogContent size="lg">
         <DialogHeader
-          title="添加 Skill"
-          description="新建或导入的 Skill 会先进入待审核队列，审核通过后才能绑定给助理。"
+          title="添加自定义技能"
+          description="新建或导入的技能会先进入待审核队列，审核通过后才能绑定给助理。"
         />
         <DialogBody className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
@@ -562,11 +947,7 @@ function AddSkillDialog({
           >
             <div className="space-y-2">
               <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-line-strong bg-raised px-3 py-2 text-[11.5px] text-muted hover:border-accent">
-                {reading ? (
-                  <Loader2 size={13} className="animate-spin" />
-                ) : (
-                  <FileUp size={13} />
-                )}
+                {reading ? <Loader2 size={13} className="animate-spin" /> : <FileUp size={13} />}
                 <span className="truncate">
                   {fileName || (reading ? '正在读取…' : '选择 SKILL.md 文件（自动提取名称与说明）')}
                 </span>
@@ -588,11 +969,7 @@ function AddSkillDialog({
 
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="分类" htmlFor="skill-category">
-              <Select
-                id="skill-category"
-                value={category}
-                onChange={(event) => setCategory(event.target.value)}
-              >
+              <Select id="skill-category" value={category} onChange={(event) => setCategory(event.target.value)}>
                 {SKILL_CATEGORIES.map((item) => (
                   <option key={item} value={item}>
                     {item}
@@ -607,7 +984,7 @@ function AddSkillDialog({
                 onChange={(event) => setSource(event.target.value as 'custom' | 'imported')}
               >
                 <option value="custom">企业自建 · {currentUserName}</option>
-                <option value="imported">从 Skills Hub 导入</option>
+                <option value="imported">从技能源导入</option>
               </Select>
             </Field>
           </div>
@@ -629,9 +1006,7 @@ function AddSkillDialog({
                   aria-pressed={risk === key}
                   className={cn(
                     'rounded-lg border px-3 py-2 text-left transition-colors',
-                    risk === key
-                      ? 'border-accent-line bg-accent-soft'
-                      : 'border-line bg-surface hover:bg-raised',
+                    risk === key ? 'border-accent-line bg-accent-soft' : 'border-line bg-surface hover:bg-raised',
                   )}
                 >
                   <span className="block text-[11.5px] font-medium text-ink">{label}</span>
@@ -653,9 +1028,7 @@ function AddSkillDialog({
                     checked={permissions.includes(permission)}
                     onChange={(event) =>
                       setPermissions((prev) =>
-                        event.target.checked
-                          ? [...prev, permission]
-                          : prev.filter((item) => item !== permission),
+                        event.target.checked ? [...prev, permission] : prev.filter((item) => item !== permission),
                       )
                     }
                   />
@@ -666,8 +1039,7 @@ function AddSkillDialog({
           </div>
 
           <div className="rounded-lg border border-line bg-raised px-3 py-2.5 text-[10.5px] leading-4 text-muted">
-            当前版本不会加载技能代码。接入执行型 Skill 时，
-            需要签名校验、权限审查与资源配额，并在隔离运行域执行；来源与版本会写入审计记录。
+            当前版本不会加载技能代码。接入执行型技能时，需要签名校验、权限审查与资源配额，并在隔离运行域执行；来源与版本会写入审计记录。
           </div>
         </DialogBody>
         <DialogFooter>
@@ -676,226 +1048,6 @@ function AddSkillDialog({
           </Button>
           <Button variant="primary" onClick={handleCreate}>
             <Plus size={14} /> 提交审核
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-interface LibrarySkill {
-  name: string
-  description: string
-  slug: string
-  sourceRepo: string
-  sourceUrl: string
-  content: string
-  license: string
-  version: string
-  category: string
-  risk: Risk
-}
-
-function SkillLibraryDialog({
-  open,
-  onOpenChange,
-  existing,
-  createSkill,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  existing: Skill[]
-  createSkill: ReturnType<typeof useStore>['createSkill']
-}) {
-  const [library, setLibrary] = useState<{ sources: { label: string; url: string }[]; skills: LibrarySkill[] } | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [query, setQuery] = useState('')
-  const [category, setCategory] = useState('all')
-  const [sourceFilter, setSourceFilter] = useState('all')
-  const [recent, setRecent] = useState<string[]>([])
-
-  useEffect(() => {
-    if (!open || library) return
-    let cancelled = false
-    setLoading(true)
-    setError('')
-    fetch('/skill-library.json')
-      .then((response) => {
-        if (!response.ok) throw new Error(`读取失败（${response.status}）`)
-        return response.json()
-      })
-      .then((data) => {
-        if (!cancelled) setLibrary(data)
-      })
-      .catch((reason) => {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : '读取失败')
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [open, library])
-
-  const skills = library?.skills ?? []
-  const existingNames = new Set(existing.map((skill) => skill.name))
-  const categories = Array.from(new Set(skills.map((skill) => skill.category)))
-  const sources = library?.sources ?? []
-
-  const visible = skills
-    .filter((skill) => category === 'all' || skill.category === category)
-    .filter((skill) => sourceFilter === 'all' || skill.sourceRepo === sourceFilter)
-    .filter((skill) => {
-      const needle = query.trim().toLowerCase()
-      if (!needle) return true
-      return `${skill.name} ${skill.description} ${skill.category}`.toLowerCase().includes(needle)
-    })
-
-  const importSkill = (skill: LibrarySkill) => {
-    if (existingNames.has(skill.name)) return
-    createSkill({
-      name: skill.name,
-      description: skill.description,
-      category: skill.category,
-      source: 'imported',
-      version: skill.version,
-      risk: skill.risk,
-      permissions: [],
-      content: skill.content,
-      sourceUrl: skill.sourceUrl,
-      sourceLabel: `Skills Hub · ${skill.sourceRepo}`,
-      author: skill.sourceRepo.split('/')[0],
-      license: skill.license,
-    })
-    setRecent((prev) => [skill.name, ...prev].slice(0, 8))
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent size="xl">
-        <DialogHeader
-          title="技能仓库"
-          description={`来自 ${sources.map((item) => item.label).join('、') || '公开仓库'}，已按名称与描述去重。导入后进入待审核队列。`}
-          icon={Library}
-        />
-        <DialogBody className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative w-full max-w-[260px]">
-              <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-faint" />
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索技能名称或说明"
-                aria-label="搜索技能仓库"
-                className="h-8 w-full rounded-lg border border-line bg-surface pl-7 pr-2.5 text-[12px] text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/10"
-              />
-            </div>
-            <Select
-              value={category}
-              onChange={(event) => setCategory(event.target.value)}
-              className="h-8 w-[128px] text-[11.5px]"
-              aria-label="按分类筛选仓库"
-            >
-              <option value="all">全部分类</option>
-              {categories.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </Select>
-            <Select
-              value={sourceFilter}
-              onChange={(event) => setSourceFilter(event.target.value)}
-              className="h-8 w-[148px] text-[11.5px]"
-              aria-label="按来源筛选仓库"
-            >
-              <option value="all">全部来源</option>
-              {sources.map((item) => (
-                <option key={item.label} value={item.label}>
-                  {item.label}
-                </option>
-              ))}
-            </Select>
-            <span className="ml-auto text-[10.5px] text-faint">
-              {loading ? '正在读取技能仓库…' : `${visible.length} / ${skills.length} 个技能`}
-            </span>
-          </div>
-
-          {recent.length > 0 && (
-            <div className="rounded-lg border border-success/25 bg-success-soft px-3 py-2 text-[11px] text-success">
-              已导入：{recent.join('、')}，可以在列表里审核启用。
-            </div>
-          )}
-
-          {error && (
-            <p className="rounded-lg bg-danger-soft px-3 py-2 text-[11.5px] text-danger">{error}</p>
-          )}
-
-          {loading ? (
-            <div className="flex items-center justify-center gap-2 py-12 text-[12px] text-muted">
-              <Loader2 size={14} className="animate-spin" /> 正在加载技能仓库…
-            </div>
-          ) : (
-            <div className="max-h-[52vh] divide-y divide-line overflow-y-auto rounded-lg border border-line">
-              {visible.slice(0, 200).map((skill) => {
-                const exists = existingNames.has(skill.name)
-                return (
-                  <div key={`${skill.sourceRepo}/${skill.slug}`} className="flex items-start gap-3 px-3 py-2.5">
-                    <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-sunken text-ink-soft">
-                      <FileUp size={13} />
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-[12px] font-medium text-ink">{skill.name}</span>
-                        <Badge tone="outline">{skill.category}</Badge>
-                        <RiskBadge risk={skill.risk} />
-                      </div>
-                      <p className="mt-0.5 line-clamp-2 text-[10.5px] leading-4 text-muted">
-                        {skill.description}
-                      </p>
-                      <p className="mt-0.5 text-[9.5px] text-faint">
-                        {skill.sourceRepo} · {skill.license}
-                        {skill.sourceUrl && (
-                          <>
-                            {' · '}
-                            <a
-                              href={skill.sourceUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-accent hover:underline"
-                            >
-                              查看原文
-                            </a>
-                          </>
-                        )}
-                      </p>
-                    </div>
-                    <Button
-                      size="sm"
-                      variant={exists ? 'ghost' : 'secondary'}
-                      disabled={exists}
-                      onClick={() => importSkill(skill)}
-                    >
-                      {exists ? '已导入' : <><Plus size={12} /> 导入</>}
-                    </Button>
-                  </div>
-                )
-              })}
-              {visible.length === 0 && (
-                <div className="px-3 py-10 text-center text-[11.5px] text-faint">没有匹配的技能。</div>
-              )}
-            </div>
-          )}
-
-          <p className="text-[10px] leading-4 text-faint">
-            仓库技能来自公开 GitHub 仓库，导入时保留原文与来源链接；启用前请核对权限与风险，助理只把 SKILL.md 当指令，不会执行其中的代码。
-          </p>
-        </DialogBody>
-        <DialogFooter>
-          <Button variant="secondary" onClick={() => onOpenChange(false)}>
-            关闭
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -937,10 +1089,7 @@ function SkillDetailDialog({
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent size="lg">
-        <DialogHeader
-          title={skill.name}
-          description={`${skill.category} · ${skill.sourceLabel}`}
-        />
+        <DialogHeader title={skill.name} description={`${skill.category} · ${skill.sourceLabel}`} />
         <DialogBody className="space-y-5">
           <div className="flex flex-wrap items-center gap-2">
             <StatusPill status={skill.status} />
@@ -1095,13 +1244,7 @@ function SkillDetailDialog({
           )}
         </DialogFooter>
       </DialogContent>
-      {editOpen && (
-        <EditSkillDialog
-          skill={skill}
-          onClose={() => setEditOpen(false)}
-          onSave={onUpdate}
-        />
-      )}
+      {editOpen && <EditSkillDialog skill={skill} onClose={() => setEditOpen(false)} onSave={onUpdate} />}
     </Dialog>
   )
 }
@@ -1199,9 +1342,7 @@ function EditSkillDialog({
                     checked={permissions.includes(permission)}
                     onChange={(event) =>
                       setPermissions((prev) =>
-                        event.target.checked
-                          ? [...prev, permission]
-                          : prev.filter((item) => item !== permission),
+                        event.target.checked ? [...prev, permission] : prev.filter((item) => item !== permission),
                       )
                     }
                   />
