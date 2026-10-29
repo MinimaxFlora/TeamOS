@@ -309,15 +309,30 @@ export async function startGateway() {
       stdio: ['ignore', out, out],
       detached: false,
     })
-    gateway.on('exit', (code, signal) => {
+    gateway.on('exit', async (code, signal) => {
       logLine(`[gateway] exited code=${code} signal=${signal}`)
+      gateway = null
+      // The Hermes image supervises its own gateway under s6. When ours loses
+      // the race, `hermes gateway run` exits 0 with "the host gateway already
+      // serves profile 'default'". Probe the shared port before reporting a
+      // stop, otherwise the panel says "未启动" while chat works fine.
+      const healthy = await hermesHealth(1500)
+      if (healthy) {
+        gatewayState = {
+          ...gatewayState,
+          status: 'ready',
+          startedAt: gatewayState.startedAt ?? new Date().toISOString(),
+          lastError: null,
+          pid: null,
+        }
+        return
+      }
       gatewayState = {
         ...gatewayState,
         status: code === 0 ? 'stopped' : 'failed',
         lastError: `Hermes gateway exited (${code ?? signal})`,
         pid: null,
       }
-      gateway = null
     })
     gatewayState = {
       status: 'starting',
@@ -488,6 +503,40 @@ export async function testModel() {
   }
 }
 
+let healthTimer = null
+
+function startHealthWatchdog() {
+  if (healthTimer) return
+  let misses = 0
+  healthTimer = setInterval(async () => {
+    const healthy = await hermesHealth(2500)
+    if (healthy) {
+      misses = 0
+      if (gatewayState.status !== 'ready') {
+        gatewayState = {
+          ...gatewayState,
+          status: 'ready',
+          startedAt: gatewayState.startedAt ?? new Date().toISOString(),
+          lastError: null,
+        }
+        logLine('[gateway] health check passed; marking ready')
+      }
+    } else if (gatewayState.status === 'ready') {
+      misses += 1
+      if (misses >= 2) {
+        gatewayState = {
+          ...gatewayState,
+          status: 'stopped',
+          lastError: 'Hermes gateway health check failed',
+          pid: null,
+        }
+      }
+    }
+  }, 15000)
+  healthTimer.unref?.()
+}
+
 export function initializeGateway() {
+  startHealthWatchdog()
   startGateway().catch((error) => logLine(`[gateway] start failed: ${error.stack || error.message}`))
 }
