@@ -1,5 +1,9 @@
 # Python helpers used by the Node server (file text extraction + audio transcription).
-faster-whisper>=1.0.3
+# faster-whisper 1.2.1 仍会调用 av.open(..., metadata_errors=...)，
+# 而 PyAV 19 删掉了这个参数（会报 unexpected keyword argument）。
+# 在 faster-whisper 适配之前固定 PyAV < 19。
+av>=11,<19
+faster-whisper>=1.0.3,<2
 pypdf>=4.2
 python-docx>=1.1
 openpyxl>=3.1
