@@ -20,6 +20,14 @@ fi
 if [ -d "$DIR/.git" ]; then
   echo "更新代码：$DIR"
   git -C "$DIR" pull --ff-only
+elif [ -f "$DIR/docker-compose.yml" ]; then
+  # 早期用 make vps-deploy 上传的目录没有 .git：接管它，保留 .env 与 backups。
+  echo "接管已有部署目录：$DIR"
+  git -C "$DIR" init -q
+  git -C "$DIR" remote remove origin 2>/dev/null || true
+  git -C "$DIR" remote add origin "$REPO_URL"
+  git -C "$DIR" fetch --depth 1 origin main
+  git -C "$DIR" checkout -f -B main FETCH_HEAD
 else
   echo "下载代码到 $DIR"
   mkdir -p "$DIR"
